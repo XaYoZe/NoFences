@@ -5,6 +5,7 @@ using Peter;
 using System;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using static NoFences.Win32.WindowUtil;
 
@@ -15,11 +16,14 @@ namespace NoFences
         private int logicalTitleHeight;
         private int titleHeight;
         private const int titleOffset = 3;
-        private const int itemWidth = 75;
-        private const int itemHeight = 32 + itemPadding + textHeight;
-        private const int textHeight = 35;
-        private const int itemPadding = 15;
         private const float shadowDist = 1.5f;
+
+        private int iconSize;
+        private int itemWidth;
+        private int textHeight;
+        private int itemPadding;
+        private int itemHeight;
+        private ICONMETRICS iconMetrics;
 
         private readonly FenceInfo fenceInfo;
 
@@ -38,18 +42,158 @@ namespace NoFences
         private int scrollHeight;
         private int scrollOffset;
 
+        private readonly Timer iconMetricsPollTimer;
+        private int lastDesktopIconSize;
+
         private readonly ThrottledExecution throttledMove = new ThrottledExecution(TimeSpan.FromSeconds(4));
         private readonly ThrottledExecution throttledResize = new ThrottledExecution(TimeSpan.FromSeconds(4));
 
         private readonly ShellContextMenu shellContextMenu = new ShellContextMenu();
 
-        private readonly ThumbnailProvider thumbnailProvider = new ThumbnailProvider();
+        private readonly ThumbnailProvider thumbnailProvider;
+
+        private int DevicePixelsToLogical(int devicePixels)
+        {
+            // Use native GetDpiForWindow instead of CreateGraphics().DpiX,
+            // because WinForms caches the DPI value and won't reflect
+            // real-time DPI changes (e.g., Settings → Display → Scale).
+            uint dpi = 96;
+            if (IsHandleCreated)
+                dpi = GetDpiForWindow(Handle);
+            return (int)Math.Round(devicePixels * 96.0 / dpi);
+        }
+
+        private void LoadAndApplyMetrics()
+        {
+            try
+            {
+                // Read desktop SysListView32 actual icon spacing (device pixels)
+                int deviceSpacing = GetDesktopIconSpacing();
+
+                // Read system icon metrics for font info
+                iconMetrics = new ICONMETRICS();
+                iconMetrics.cbSize = (uint)Marshal.SizeOf(typeof(ICONMETRICS));
+                SystemParametersInfo(SPI_GETICONMETRICS, iconMetrics.cbSize, ref iconMetrics, 0);
+
+                // Convert device-pixel spacing to logical (96 DPI) units for WinForms auto-scaling
+                int logicalSpacing;
+                if (deviceSpacing > 0)
+                    logicalSpacing = DevicePixelsToLogical(deviceSpacing);
+                else if (iconMetrics.iHorzSpacing > 0)
+                    logicalSpacing = iconMetrics.iHorzSpacing; // already 96-DPI logical
+                else
+                    logicalSpacing = 75;
+
+                itemWidth = Math.Max(60, logicalSpacing);
+                iconSize = Math.Max(16, (int)(itemWidth * 0.43));
+                itemPadding = Math.Max(4, (int)(itemWidth * 0.13));
+                textHeight = Math.Max(20, itemPadding + 23);
+                itemHeight = iconSize + itemPadding + textHeight;
+            }
+            catch
+            {
+                itemWidth = 75;
+                iconSize = 32;
+                textHeight = 35;
+                itemPadding = 15;
+                itemHeight = iconSize + itemPadding + textHeight;
+            }
+        }
+
+        private static int GetDesktopIconSpacing()
+        {
+            // Find the desktop SysListView32 and read its icon spacing via LVM_GETITEMSPACING
+            IntPtr hwndProgman = FindWindow("Progman", null);
+            if (hwndProgman == IntPtr.Zero)
+                return -1;
+
+            IntPtr hwndDefView = FindWindowEx(hwndProgman, IntPtr.Zero, "SHELLDLL_DefView", null);
+            IntPtr hwndListView;
+
+            if (hwndDefView != IntPtr.Zero)
+            {
+                hwndListView = FindWindowEx(hwndDefView, IntPtr.Zero, "SysListView32", null);
+            }
+            else
+            {
+                // WorkerW fallback (some Windows versions)
+                IntPtr hwndWorkerW = IntPtr.Zero;
+                do
+                {
+                    hwndWorkerW = FindWindowEx(IntPtr.Zero, hwndWorkerW, "WorkerW", null);
+                    if (hwndWorkerW != IntPtr.Zero)
+                    {
+                        hwndDefView = FindWindowEx(hwndWorkerW, IntPtr.Zero, "SHELLDLL_DefView", null);
+                        if (hwndDefView != IntPtr.Zero)
+                            break;
+                    }
+                } while (hwndWorkerW != IntPtr.Zero);
+
+                hwndListView = hwndDefView != IntPtr.Zero
+                    ? FindWindowEx(hwndDefView, IntPtr.Zero, "SysListView32", null)
+                    : IntPtr.Zero;
+            }
+
+            if (hwndListView == IntPtr.Zero)
+                return -1;
+
+            // LVM_GETITEMSPACING with bSmallIcon=FALSE returns the spacing for current view
+            IntPtr result = SendMessage(hwndListView, 0x1033, IntPtr.Zero, IntPtr.Zero);
+            if (result == IntPtr.Zero)
+                return -1;
+
+            int spacingX = unchecked((short)((uint)result & 0xFFFF));
+            return spacingX;
+        }
+
+        private void ApplyIconMetrics()
+        {
+            var prevIconSize = iconSize;
+            LoadAndApplyMetrics();
+            int curDeviceSpacing = GetDesktopIconSpacing();
+            int curLogicalSpacing = curDeviceSpacing > 0 ? DevicePixelsToLogical(curDeviceSpacing) : -1;
+            lastDesktopIconSize = curLogicalSpacing;
+            if (iconSize != prevIconSize)
+            {
+                thumbnailProvider.TargetSize = LogicalToDeviceUnits(iconSize);
+                ReloadFonts();
+                Invalidate();
+            }
+        }
+
+        private Font CreateIconFontFromLogFont()
+        {
+            try
+            {
+                var lf = iconMetrics.lfFont;
+                if (lf.lfFaceName == null || lf.lfFaceName.Length == 0)
+                    return new Font("Segoe UI", 9f);
+                float fontSize = Math.Abs(lf.lfHeight);
+                using (var g = CreateGraphics())
+                {
+                    fontSize = fontSize * 72f / g.DpiY;
+                }
+                if (fontSize < 6f) fontSize = 9f;
+                var style = FontStyle.Regular;
+                if (lf.lfItalic != 0) style |= FontStyle.Italic;
+                if (lf.lfWeight >= 700) style |= FontStyle.Bold;
+                if (lf.lfUnderline != 0) style |= FontStyle.Underline;
+                if (lf.lfStrikeOut != 0) style |= FontStyle.Strikeout;
+                return new Font(lf.lfFaceName, fontSize, style);
+            }
+            catch
+            {
+                return new Font("Segoe UI", 9f);
+            }
+        }
 
         private void ReloadFonts()
         {
             var family = new FontFamily("Segoe UI");
+            titleFont?.Dispose();
+            iconFont?.Dispose();
             titleFont = new Font(family, (int)Math.Floor(logicalTitleHeight / 2.0));
-            iconFont = new Font(family, 9);
+            iconFont = CreateIconFontFromLogFont();
         }
 
         public FenceWindow(FenceInfo fenceInfo)
@@ -60,6 +204,27 @@ namespace NoFences
             WindowUtil.HideFromAltTab(Handle);
             DesktopUtil.GlueToDesktop(Handle);
             //DesktopUtil.PreventMinimize(Handle);
+
+            // Must compute metrics AFTER Handle is created for correct DeviceDpi
+            LoadAndApplyMetrics();
+            int curDeviceSpacing = GetDesktopIconSpacing();
+            lastDesktopIconSize = curDeviceSpacing > 0 ? DevicePixelsToLogical(curDeviceSpacing) : -1;
+
+            thumbnailProvider = new ThumbnailProvider(LogicalToDeviceUnits(iconSize));
+
+            // Poll desktop SysListView32 icon spacing every 1.5s (catches Ctrl+Scroll)
+            iconMetricsPollTimer = new Timer { Interval = 1500 };
+            iconMetricsPollTimer.Tick += (s, e) =>
+            {
+                int curSpacing = GetDesktopIconSpacing();
+                int curLogical = curSpacing > 0 ? DevicePixelsToLogical(curSpacing) : -1;
+                if (curLogical > 0 && curLogical != lastDesktopIconSize)
+                {
+                    ApplyIconMetrics();
+                }
+            };
+            iconMetricsPollTimer.Start();
+
             logicalTitleHeight = (fenceInfo.TitleHeight < 16 || fenceInfo.TitleHeight > 100) ? 35 : fenceInfo.TitleHeight;
             titleHeight = LogicalToDeviceUnits(logicalTitleHeight);
             
@@ -109,11 +274,23 @@ namespace NoFences
                 return;
             }
 
+            // DPI changed (system scaling changed in Settings)
+            if (m.Msg == WM_DPICHANGED)
+            {
+                ApplyIconMetrics();
+            }
+
             // Prevent foreground
             if (m.Msg == WM_SETFOCUS)
             {
                 SetWindowPos(Handle, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
                 return;
+            }
+
+            // Desktop icon settings changed via system broadcast - reload metrics
+            if (m.Msg == WM_SETTINGCHANGE)
+            {
+                ApplyIconMetrics();
             }
 
             // Other messages
@@ -328,13 +505,15 @@ namespace NoFences
             var icon = entry.ExtractIcon(thumbnailProvider);
             var name = entry.Name;
 
-            var textPosition = new PointF(x, y + icon.Height + 5);
+            var textPadding = itemPadding / 3;
+            var textPosition = new PointF(x, y + iconSize + textPadding);
             var textMaxSize = new SizeF(itemWidth, textHeight);
 
             var stringFormat = new StringFormat { Alignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
 
             var textSize = g.MeasureString(name, iconFont, textMaxSize, stringFormat);
-            var outlineRect = new Rectangle(x - 2, y - 2, itemWidth + 2, icon.Height + (int)textSize.Height + 5 + 2);
+            var gap = textPadding;
+            var outlineRect = new Rectangle(x - 2, y - 2, itemWidth + 2, iconSize + (int)textSize.Height + gap + 2);
             var outlineRectInner = outlineRect.Shrink(1);
 
             var mousePos = PointToClient(MousePosition);
@@ -381,7 +560,9 @@ namespace NoFences
                 }
             }
 
-            g.DrawIcon(icon, x + itemWidth / 2 - icon.Width / 2, y);
+            // Draw icon scaled to target iconSize
+            var iconRect = new Rectangle(x + itemWidth / 2 - iconSize / 2, y, iconSize, iconSize);
+            g.DrawIcon(icon, iconRect);
             g.DrawString(name, iconFont, new SolidBrush(Color.FromArgb(180, 15, 15, 15)), new RectangleF(textPosition.Move(shadowDist, shadowDist), textMaxSize), stringFormat);
             g.DrawString(name, iconFont, Brushes.White, new RectangleF(textPosition, textMaxSize), stringFormat);
         }

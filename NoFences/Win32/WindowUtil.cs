@@ -28,8 +28,51 @@ namespace NoFences.Win32
         public const int WM_ACTIVATEAPP = 0x001C;
         public const int WM_ACTIVATE = 0x0006;
         public const int WM_SETFOCUS = 0x0007;
+        public const int WM_SETTINGCHANGE = 0x001A;
+        public const int WM_DPICHANGED = 0x02E0;
         public static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
         public const int WM_WINDOWPOSCHANGING = 0x0046;
+
+        public const uint SPI_GETICONMETRICS = 0x002D;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct LOGFONT
+        {
+            public int lfHeight;
+            public int lfWidth;
+            public int lfEscapement;
+            public int lfOrientation;
+            public int lfWeight;
+            public byte lfItalic;
+            public byte lfUnderline;
+            public byte lfStrikeOut;
+            public byte lfCharSet;
+            public byte lfOutPrecision;
+            public byte lfClipPrecision;
+            public byte lfQuality;
+            public byte lfPitchAndFamily;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string lfFaceName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct ICONMETRICS
+        {
+            public uint cbSize;
+            public int iHorzSpacing;
+            public int iVertSpacing;
+            public int iTitleWrap;
+            public LOGFONT lfFont;
+        }
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref ICONMETRICS pvParam, uint fWinIni);
+
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr CreateFontIndirect(ref LOGFONT lf);
+
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteObject(IntPtr hObject);
 
         [DllImport("user32.dll")]
         public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X,
@@ -46,7 +89,13 @@ namespace NoFences.Win32
         public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);
+        [DllImport("user32.dll")]
+        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("user32.dll")]
+        public static extern uint GetDpiForWindow(IntPtr hWnd);
         #region Window styles
         [Flags]
         public enum ExtendedWindowStyles

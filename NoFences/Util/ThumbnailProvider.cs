@@ -22,6 +22,14 @@ namespace NoFences.Util
             ".tif"
         };
 
+        private int targetSize;
+
+        public int TargetSize
+        {
+            get => targetSize;
+            set => targetSize = Math.Max(16, value);
+        }
+
         private class ThumbnailState
         {
             public Icon icon;
@@ -31,6 +39,11 @@ namespace NoFences.Util
         private readonly SemaphoreSlim semaphore = new SemaphoreSlim(4);
         private readonly IDictionary<string, ThumbnailState> iconCache = new Dictionary<string, ThumbnailState>();
         public event EventHandler IconThumbnailLoaded;
+
+        public ThumbnailProvider(int targetSize = 32)
+        {
+            this.targetSize = targetSize;
+        }
 
         public bool IsSupported(string path)
         {
@@ -61,7 +74,7 @@ namespace NoFences.Util
                 {
                     using (var img = Image.FromStream(ms))
                     {
-                        var thumb = (Bitmap)img.GetThumbnailImage(32, 32, () => false, IntPtr.Zero);
+                        var thumb = (Bitmap)img.GetThumbnailImage(targetSize, targetSize, () => false, IntPtr.Zero);
                         var icon = Icon.FromHandle(thumb.GetHicon());
                         state.icon = icon;
                         IconThumbnailLoaded(this, new EventArgs());
