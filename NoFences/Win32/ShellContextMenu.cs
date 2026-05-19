@@ -440,22 +440,26 @@ namespace Peter
         /// </summary>
         /// <param name="files">FileInfos (should all be in same directory)</param>
         /// <param name="pointScreen">Where to show the menu</param>
+        /// <summary>
+        /// 显示文件/文件夹的 Windows Shell 右键菜单。
+        /// 右键单击栅栏条目时调用此方法；Shift+右键则显示应用自身的上下文菜单。
+        /// </summary>
+        /// <param name="files">要显示菜单的文件列表（应位于同一目录）</param>
+        /// <param name="pointScreen">菜单显示位置（屏幕坐标）</param>
         public void ShowContextMenu(FileInfo[] files, Point pointScreen)
         {
-            // Release all resources first.
             ReleaseAll();
             _arrPIDLs = GetPIDLs(files);
             this.ShowContextMenu(pointScreen);
         }
 
         /// <summary>
-        /// Shows the context menu
+        /// 显示目录的 Windows Shell 右键菜单。
         /// </summary>
-        /// <param name="dirs">DirectoryInfos (should all be in same directory)</param>
-        /// <param name="pointScreen">Where to show the menu</param>
+        /// <param name="dirs">目录列表（应位于同一父目录）</param>
+        /// <param name="pointScreen">菜单显示位置（屏幕坐标）</param>
         public void ShowContextMenu(DirectoryInfo[] dirs, Point pointScreen)
         {
-            // Release all resources first.
             ReleaseAll();
             _arrPIDLs = GetPIDLs(dirs);
             this.ShowContextMenu(pointScreen);

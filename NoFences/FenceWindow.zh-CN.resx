@@ -163,6 +163,15 @@
   <data name="exitToolStripMenuItem.Text" xml:space="preserve">
     <value>移除桌面分区</value>
   </data>
+  <data name="quitApplicationToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
+    <value>180, 22</value>
+  </data>
+  <data name="quitApplicationToolStripMenuItem.Text" xml:space="preserve">
+    <value>退出程序</value>
+  </data>
+  <data name="toolStripSeparator2.Size" type="System.Drawing.Size, System.Drawing">
+    <value>177, 6</value>
+  </data>
   <data name="appContextMenu.Size" type="System.Drawing.Size, System.Drawing">
     <value>181, 186</value>
   </data>

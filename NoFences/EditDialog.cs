@@ -1,24 +1,21 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace NoFences
 {
+    /// <summary>
+    /// 重命名对话框。用于修改栅栏或条目的名称。
+    /// </summary>
     public partial class EditDialog : Form
     {
+        /// <summary>用户输入的新名称</summary>
+        public string NewName => tbName.Text;
+
         public EditDialog(string oldName)
         {
             InitializeComponent();
-            tbName.Text = oldName;
+            tbName.Text = oldName; // 预填当前名称
         }
-
-        public string NewName => tbName.Text;
 
         private void btnOk_Click(object sender, EventArgs e)
         {
