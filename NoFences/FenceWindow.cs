@@ -93,9 +93,17 @@ namespace NoFences
                 else
                     logicalSpacing = 75; // 兜底默认值
 
-                // 4. 根据间距比例计算各项布局参数
+                // 4. 根据间距比例计算单元格宽度
                 itemWidth = Math.Max(60, logicalSpacing);          // 项宽度不小于 60px
-                iconSize = Math.Max(16, (int)(itemWidth * 0.43)); // 图标约占项宽度的 43%
+                // 5. 读取桌面真实图标尺寸（设备像素）
+                int deviceIconSize = GetDesktopIconSize();
+                int logicalIconSize;
+                if (deviceIconSize > 0)
+                    logicalIconSize = DevicePixelsToLogical(deviceIconSize);
+                else
+                    logicalIconSize = Math.Max(16, (int)(itemWidth * 0.43)); // 回退到估算值
+
+                iconSize = Math.Max(16, logicalIconSize); // 图标边长
                 itemPadding = Math.Max(8, (int)(itemWidth * 0.20)); // 内边距约占 20%，保证图标上边距可见
                 // 文字区域高度：按桌面图标字体行高 × 行数（iTitleWrap 启用时 2 行，否则 1 行）
                 using (var tmpFont = CreateIconFontFromLogFont())
@@ -117,17 +125,16 @@ namespace NoFences
         }
 
         /// <summary>
-        /// 直接读取桌面 SysListView32 的实际图标间距（通过 LVM_GETITEMSPACING 消息）。
-        /// 这能反映 Ctrl+滚轮 缩放桌面图标后的实时大小，
-        /// 而 SPI_GETICONMETRICS 返回的是系统默认值，不会随 Ctrl+滚轮变化。
+        /// 查找桌面 SysListView32 窗口句柄。
+        /// 桌面窗口层级：Progman → SHELLDLL_DefView → SysListView32，
+        /// 部分 Windows 版本由 WorkerW 窗口承载。
         /// </summary>
-        /// <returns>水平图标间距（设备像素），失败时返回 -1</returns>
-        private static int GetDesktopIconSpacing()
+        /// <returns>SysListView32 窗口句柄，失败时返回 IntPtr.Zero</returns>
+        private static IntPtr FindDesktopListView()
         {
-            // 桌面窗口层级：Progman → SHELLDLL_DefView → SysListView32
             IntPtr hwndProgman = FindWindow("Progman", null);
             if (hwndProgman == IntPtr.Zero)
-                return -1;
+                return IntPtr.Zero;
 
             IntPtr hwndDefView = FindWindowEx(hwndProgman, IntPtr.Zero, "SHELLDLL_DefView", null);
             IntPtr hwndListView;
@@ -156,6 +163,43 @@ namespace NoFences
                     : IntPtr.Zero;
             }
 
+            return hwndListView;
+        }
+
+        /// <summary>
+        /// 读取桌面 SysListView32 的真实图标大小（通过 ImageList_GetIconSize）。
+        /// 返回设备像素下的图标宽度，失败时返回 -1。
+        /// </summary>
+        private static int GetDesktopIconSize()
+        {
+            IntPtr hwndListView = FindDesktopListView();
+            if (hwndListView == IntPtr.Zero)
+                return -1;
+
+            // LVM_GETIMAGELIST (0x1002)：wParam=LVSIL_NORMAL(0) 获取大图标 ImageList
+            IntPtr himl = SendMessage(hwndListView, 0x1002, (IntPtr)0, IntPtr.Zero);
+            if (himl == IntPtr.Zero)
+                return -1;
+
+            int cx = 0, cy = 0;
+            if (!ImageList_GetIconSize(himl, out cx, out cy))
+                return -1;
+
+            return Math.Max(cx, cy);
+        }
+
+        [DllImport("comctl32.dll", SetLastError = true)]
+        private static extern bool ImageList_GetIconSize(IntPtr himl, out int cx, out int cy);
+
+        /// <summary>
+        /// 直接读取桌面 SysListView32 的实际图标间距（通过 LVM_GETITEMSPACING 消息）。
+        /// 这能反映 Ctrl+滚轮 缩放桌面图标后的实时大小，
+        /// 而 SPI_GETICONMETRICS 返回的是系统默认值，不会随 Ctrl+滚轮变化。
+        /// </summary>
+        /// <returns>水平图标间距（设备像素），失败时返回 -1</returns>
+        private static int GetDesktopIconSpacing()
+        {
+            IntPtr hwndListView = FindDesktopListView();
             if (hwndListView == IntPtr.Zero)
                 return -1;
 
