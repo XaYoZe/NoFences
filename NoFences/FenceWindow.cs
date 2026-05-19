@@ -64,8 +64,6 @@ namespace NoFences
             uint dpi = 96;
             if (IsHandleCreated)
                 dpi = GetDpiForWindow(Handle);
-            System.Diagnostics.Debug.WriteLine(dpi.ToString() + '-' + CreateGraphics().DpiX.ToString());
-            
             return (int)Math.Round(devicePixels * 96.0 / dpi);
         }
 
@@ -105,7 +103,7 @@ namespace NoFences
                     int lineHeight = (int)Math.Ceiling(tmpFont.GetHeight());
                     textHeight = Math.Max(lineHeight, lineHeight * 2 + 4); // 按 Windows 桌面规则始终 2 行
                 }
-                itemHeight = iconSize + itemPadding + textHeight;  // 项总高度
+                itemHeight = iconSize + itemPadding / 3 + textHeight;  // 项总高度（与实际渲染中 icon-text 间距一致）
             }
             catch
             {
@@ -114,7 +112,7 @@ namespace NoFences
                 iconSize = 32;
                 textHeight = 35;
                 itemPadding = 15;
-                itemHeight = iconSize + itemPadding + textHeight;
+                itemHeight = iconSize + itemPadding / 3 + textHeight;
             }
         }
 
@@ -660,8 +658,8 @@ namespace NoFences
                 }
             }
 
-            // 计算内容溢出高度（用于滚动条）
-            scrollHeight -= (ClientRectangle.Height - titleHeight);
+            // 计算内容溢出高度（用于滚动条），确保不会出现负值
+            scrollHeight = Math.Max(0, scrollHeight - (ClientRectangle.Height - titleHeight));
 
             // 滚动条：仅在内容溢出时绘制
             if (scrollHeight > 0)

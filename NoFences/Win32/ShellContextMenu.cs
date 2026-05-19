@@ -1564,10 +1564,11 @@ namespace Peter
         /// <returns>The unsigned integer for the High Word</returns>
         public static uint HiWord(IntPtr ptr)
         {
-            if (((uint)ptr & 0x80000000) == 0x80000000)
-                return ((uint)ptr >> 16);
+            uint value = unchecked((uint)ptr.ToInt64());
+            if ((value & 0x80000000) == 0x80000000)
+                return value >> 16;
             else
-                return ((uint)ptr >> 16) & 0xffff;
+                return (value >> 16) & 0xffff;
         }
 
         /// <summary>
@@ -1577,7 +1578,7 @@ namespace Peter
         /// <returns>The unsigned integer for the Low Word</returns>
         public static uint LoWord(IntPtr ptr)
         {
-            return (uint)ptr & 0xffff;
+            return unchecked((uint)ptr.ToInt64()) & 0xffff;
         }
 
         #endregion
