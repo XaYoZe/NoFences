@@ -1,0 +1,293 @@
+# NoFences is a classic .NET Framework 4.8 WinForms application.
+# It must be built with Visual Studio/MSBuild, not dotnet build.
+name: Build Windows installer
+
+on:
+  # Continuously verify packaging on the main branch and its pull requests.
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+  # Also allow maintainers to build packages manually from the Actions page.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build x64 installer
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      # Add the VS 2022 MSBuild installation from the hosted runner to PATH.
+      # windows-2022 already has the .NET Framework 4.8 SDK and targeting pack.
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
+
+      # Keep AssemblyFileVersion as the single source of truth. For a v* tag,
+      # also verify that the tag matches it (for example, v1.6.0 == 1.6.0.0).
+      - name: Resolve package version
+        id: version
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $assemblyInfoPath = Join-Path $env:GITHUB_WORKSPACE "NoFences\Properties\AssemblyInfo.cs"
+          $assemblyInfo = Get-Content -LiteralPath $assemblyInfoPath -Raw
+          $versionMatch = [regex]::Match(
+            $assemblyInfo,
+            'AssemblyFileVersion\("(?<version>\d+\.\d+\.\d+\.\d+)"\)'
+          )
+
+          if (-not $versionMatch.Success) {
+            throw "Cannot find a four-part AssemblyFileVersion in $assemblyInfoPath."
+          }
+
+          $packageVersion = $versionMatch.Groups["version"].Value
+
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tagVersionText = $env:GITHUB_REF_NAME -replace "^v", ""
+
+            if ($tagVersionText -notmatch "^\d+(?:\.\d+){1,3}$") {
+              throw "Tag '$env:GITHUB_REF_NAME' must use a numeric version such as v1.6.0."
+            }
+
+            $tagParts = @($tagVersionText.Split("."))
+            while ($tagParts.Count -lt 4) {
+              $tagParts += "0"
+            }
+
+            $normalizedTagVersion = $tagParts -join "."
+            if ([version]$normalizedTagVersion -ne [version]$packageVersion) {
+              throw (
+                "Tag version '$normalizedTagVersion' does not match " +
+                "AssemblyFileVersion '$packageVersion'."
+              )
+            }
+          }
+
+          "PACKAGE_VERSION=$packageVersion" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          "version=$packageVersion" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
+
+      # The solution configuration is named Any CPU, while NoFences.csproj
+      # explicitly sets PlatformTarget to x64 for Release builds.
+      - name: Build Release
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $msbuildArguments = @(
+            "NoFences.sln"
+            "/m"
+            "/t:Rebuild"
+            "/p:Configuration=Release"
+            "/p:Platform=Any CPU"
+            "/p:ContinuousIntegrationBuild=true"
+            "/verbosity:minimal"
+          )
+          & msbuild @msbuildArguments
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSBuild failed with exit code $LASTEXITCODE."
+          }
+
+          $executable = Join-Path $env:GITHUB_WORKSPACE "NoFences\bin\Release\NoFences.exe"
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+            throw "Expected build output was not found: $executable"
+          }
+
+      # Stage one clean directory for both packages. This preserves config and
+      # satellite resource files while excluding debug-only PDB files.
+      - name: Create installer and portable package
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE "NoFences\bin\Release"
+          $artifactDirectory = Join-Path $env:GITHUB_WORKSPACE "artifacts"
+          $portableDirectory = Join-Path $artifactDirectory "portable\NoFences"
+
+          if (Test-Path -LiteralPath $artifactDirectory) {
+            Remove-Item -LiteralPath $artifactDirectory -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $portableDirectory -Force | Out-Null
+          Copy-Item -Path (Join-Path $releaseDirectory "*") -Destination $portableDirectory -Recurse -Force
+
+          Get-ChildItem -LiteralPath $portableDirectory -Filter "*.pdb" -File -Recurse |
+            Remove-Item -Force
+
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "LICENSE") -Destination $portableDirectory
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "README.md") -Destination $portableDirectory
+
+          $portableExecutable = Join-Path $portableDirectory "NoFences.exe"
+          if (-not (Test-Path -LiteralPath $portableExecutable -PathType Leaf)) {
+            throw "Portable staging directory does not contain NoFences.exe."
+          }
+
+          # windows-2022 includes Inno Setup 6. Checking both standard locations
+          # and PATH also keeps this compatible with suitable self-hosted runners.
+          $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+          $isccCandidates = @(
+            (Join-Path $programFilesX86 "Inno Setup 6\ISCC.exe"),
+            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+          )
+          $iscc = $isccCandidates |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+
+          if (-not $iscc) {
+            $isccCommand = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+            if ($isccCommand) {
+              $iscc = $isccCommand.Source
+            }
+          }
+
+          if (-not $iscc) {
+            throw "Inno Setup compiler (ISCC.exe) was not found on the runner."
+          }
+
+          # Environment variables safely carry paths with spaces into ISPP.
+          $env:NOFENCES_SOURCE_DIR = $portableDirectory
+          $env:NOFENCES_OUTPUT_DIR = $artifactDirectory
+          $env:NOFENCES_REPOSITORY_ROOT = $env:GITHUB_WORKSPACE
+          $env:NOFENCES_REPOSITORY_URL = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          $env:NOFENCES_PUBLISHER = $env:GITHUB_REPOSITORY_OWNER
+
+          $installerScript = Join-Path $env:RUNNER_TEMP "NoFences.iss"
+          @'
+          #define AppVersion GetEnv("PACKAGE_VERSION")
+          #define SourceDir GetEnv("NOFENCES_SOURCE_DIR")
+          #define OutputDir GetEnv("NOFENCES_OUTPUT_DIR")
+          #define RepositoryRoot GetEnv("NOFENCES_REPOSITORY_ROOT")
+          #define RepositoryUrl GetEnv("NOFENCES_REPOSITORY_URL")
+          #define Publisher GetEnv("NOFENCES_PUBLISHER")
+
+          [Setup]
+          AppId={{9B7EC27E-0066-4455-987C-6DC88C4BEE54}
+          AppName=NoFences
+          AppVersion={#AppVersion}
+          AppVerName=NoFences {#AppVersion}
+          AppPublisher={#Publisher}
+          AppPublisherURL={#RepositoryUrl}
+          AppSupportURL={#RepositoryUrl}/issues
+          AppUpdatesURL={#RepositoryUrl}/releases
+          AppMutex=No_fences
+          DefaultDirName={autopf}\NoFences
+          DefaultGroupName=NoFences
+          DisableProgramGroupPage=yes
+          LicenseFile={#RepositoryRoot}\LICENSE
+          OutputDir={#OutputDir}
+          OutputBaseFilename=NoFences-{#AppVersion}-win-x64-setup
+          Compression=lzma2/max
+          SolidCompression=yes
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          PrivilegesRequired=lowest
+          PrivilegesRequiredOverridesAllowed=dialog
+          UninstallDisplayIcon={app}\NoFences.exe
+          WizardStyle=modern
+          CloseApplications=yes
+          RestartApplications=no
+          VersionInfoVersion={#AppVersion}
+          VersionInfoCompany={#Publisher}
+          VersionInfoDescription=NoFences Windows installer
+          VersionInfoProductName=NoFences
+          VersionInfoProductVersion={#AppVersion}
+
+          [Tasks]
+          Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+          [Files]
+          Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autoprograms}\NoFences"; Filename: "{app}\NoFences.exe"
+          Name: "{autodesktop}\NoFences"; Filename: "{app}\NoFences.exe"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\NoFences.exe"; Description: "{cm:LaunchProgram,NoFences}"; Flags: nowait postinstall skipifsilent
+
+          [Code]
+          function InitializeSetup(): Boolean;
+          var
+            Release: Cardinal;
+          begin
+            Result :=
+              RegQueryDWordValue(
+                HKLM64,
+                'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full',
+                'Release',
+                Release) and
+              (Release >= 528040);
+
+            if not Result then
+              MsgBox(
+                'NoFences requires Microsoft .NET Framework 4.8 or later.',
+                mbError,
+                MB_OK);
+          end;
+          '@ | Set-Content -LiteralPath $installerScript -Encoding utf8
+
+          & $iscc $installerScript
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE."
+          }
+
+          $installerPath = Join-Path $artifactDirectory (
+            "NoFences-$env:PACKAGE_VERSION-win-x64-setup.exe"
+          )
+          if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+            throw "Expected installer was not generated: $installerPath"
+          }
+
+          $portableArchive = Join-Path $artifactDirectory (
+            "NoFences-$env:PACKAGE_VERSION-win-x64-portable.zip"
+          )
+          Compress-Archive -Path $portableDirectory -DestinationPath $portableArchive -CompressionLevel Optimal
+
+          $packageFiles = @($installerPath, $portableArchive)
+          $checksumLines = foreach ($file in $packageFiles) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([System.IO.Path]::GetFileName($file))"
+          }
+          $checksumPath = Join-Path $artifactDirectory "SHA256SUMS.txt"
+          $checksumLines | Set-Content -LiteralPath $checksumPath -Encoding ascii
+
+          @(
+            "### Windows x64 packages"
+            ""
+            "- Installer: $([System.IO.Path]::GetFileName($installerPath))"
+            "- Portable: $([System.IO.Path]::GetFileName($portableArchive))"
+            "- Version: $env:PACKAGE_VERSION"
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      # The EXE and ZIP are already compressed, so avoid recompressing them.
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: NoFences-${{ steps.version.outputs.version }}-win-x64
+          path: |
+            artifacts/*.exe
+            artifacts/*.zip
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
