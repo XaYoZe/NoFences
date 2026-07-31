@@ -36,6 +36,7 @@
             this.minifyToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.renameToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.titleSizeToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.themeToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.toolStripSeparator1 = new System.Windows.Forms.ToolStripSeparator();
             this.newFenceToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.exitToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
@@ -53,6 +54,7 @@
             this.minifyToolStripMenuItem,
             this.renameToolStripMenuItem,
             this.titleSizeToolStripMenuItem,
+            this.themeToolStripMenuItem,
             this.toolStripSeparator1,
             this.newFenceToolStripMenuItem,
             this.exitToolStripMenuItem,
@@ -93,7 +95,13 @@
             resources.ApplyResources(this.titleSizeToolStripMenuItem, "titleSizeToolStripMenuItem");
             this.titleSizeToolStripMenuItem.Name = "titleSizeToolStripMenuItem";
             this.titleSizeToolStripMenuItem.Click += new System.EventHandler(this.titleSizeToolStripMenuItem_Click);
-            // 
+            //
+            // themeToolStripMenuItem
+            //
+            this.themeToolStripMenuItem.Name = "themeToolStripMenuItem";
+            this.themeToolStripMenuItem.Text = "Theme...";
+            this.themeToolStripMenuItem.Click += new System.EventHandler(this.themeToolStripMenuItem_Click);
+            //
             // toolStripSeparator1
             // 
             resources.ApplyResources(this.toolStripSeparator1, "toolStripSeparator1");
@@ -165,6 +173,7 @@
         private System.Windows.Forms.ToolStripMenuItem deleteItemToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem newFenceToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem titleSizeToolStripMenuItem;
+        private System.Windows.Forms.ToolStripMenuItem themeToolStripMenuItem;
     }
 }
 

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Windows.Forms;
+using NoFences.Theming;
 
 namespace NoFences
 {
@@ -7,7 +8,7 @@ namespace NoFences
     /// 标题栏高度调整对话框。
     /// 通过 TrackBar 滑块调整栅栏标题栏的高度（20~100px）。
     /// </summary>
-    public partial class HeightDialog : Form
+    public partial class HeightDialog : ThemeAwareForm
     {
         /// <summary>用户选择的标题栏高度（逻辑像素）</summary>
         public int TitleHeight => trackBarTitleHeight.Value;

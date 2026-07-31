@@ -195,6 +195,59 @@ namespace NoFences.Win32
         [DllImport("uxtheme.dll", EntryPoint = "#135", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern int SetPreferredAppMode(int preferredAppMode);
 
+        [DllImport("uxtheme.dll", EntryPoint = "#136", SetLastError = true)]
+        private static extern void FlushMenuThemes();
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(
+            IntPtr hwnd,
+            int attribute,
+            ref int value,
+            int valueSize);
+
+        /// <summary>
+        /// 尽力为 Explorer/Shell 原生菜单请求匹配的明暗模式。
+        /// 这些 uxtheme 序号 API 在旧版 Windows 上可能不存在，因此失败时静默回退。
+        /// </summary>
+        public static void TrySetPreferredAppMode(bool preferDark)
+        {
+            try
+            {
+                // PreferredAppMode：ForceDark = 2，ForceLight = 3。
+                SetPreferredAppMode(preferDark ? 2 : 3);
+                FlushMenuThemes();
+            }
+            catch (DllNotFoundException)
+            {
+            }
+            catch (EntryPointNotFoundException)
+            {
+            }
+        }
+
+        /// <summary>
+        /// 为设置对话框应用深色或浅色原生标题栏。属性 20 为当前值，
+        /// 属性 19 用于兼容较早的 Windows 10 版本。
+        /// </summary>
+        public static void TrySetImmersiveDarkMode(IntPtr handle, bool enabled)
+        {
+            if (handle == IntPtr.Zero)
+                return;
+
+            try
+            {
+                int value = enabled ? 1 : 0;
+                if (DwmSetWindowAttribute(handle, 20, ref value, sizeof(int)) != 0)
+                    DwmSetWindowAttribute(handle, 19, ref value, sizeof(int));
+            }
+            catch (DllNotFoundException)
+            {
+            }
+            catch (EntryPointNotFoundException)
+            {
+            }
+        }
+
         /// <summary>
         /// 将窗口从 Alt+Tab 切换列表中隐藏。
         /// 通过添加 WS_EX_TOOLWINDOW 扩展样式实现。

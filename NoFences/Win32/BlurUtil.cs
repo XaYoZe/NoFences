@@ -52,8 +52,20 @@ namespace NoFences.Win32
         /// </summary>
         public static void EnableBlur(IntPtr hwnd)
         {
+            SetBlur(hwnd, true);
+        }
+
+        /// <summary>
+        /// Enables or disables the compositor blur used by transparent themes.
+        /// Keeping both states in one method lets a running fence switch between
+        /// Windows 11 and opaque/classic themes without recreating its handle.
+        /// </summary>
+        public static void SetBlur(IntPtr hwnd, bool enabled)
+        {
             var accent = new AccentPolicy();
-            accent.AccentState = AccentState.ACCENT_ENABLE_BLURBEHIND;
+            accent.AccentState = enabled
+                ? AccentState.ACCENT_ENABLE_BLURBEHIND
+                : AccentState.ACCENT_DISABLED;
 
             var accentStructSize = Marshal.SizeOf(accent);
 

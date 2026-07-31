@@ -1,4 +1,5 @@
 ﻿using NoFences.Model;
+using NoFences.Theming;
 using NoFences.Util;
 using NoFences.Win32;
 using Peter;
@@ -54,6 +55,10 @@ namespace NoFences
         private readonly ShellContextMenu shellContextMenu = new ShellContextMenu();
 
         private readonly ThumbnailProvider thumbnailProvider;
+
+        // 主题对象始终保存为独立快照，确保一次绘制使用一致的颜色和尺寸。
+        private ThemeDefinition currentTheme;
+        private Image backgroundImage;
 
         /// <summary>
         /// 将设备像素（物理像素）转换为逻辑像素（96 DPI 坐标）。
@@ -225,6 +230,7 @@ namespace NoFences
 
             // 系统设置消息也可能只改变字体，因此每次应用度量都重建字体并重绘
             ReloadFonts();
+            UpdateRoundedRegion();
             Invalidate();
         }
 
@@ -239,8 +245,12 @@ namespace NoFences
             try
             {
                 var lf = iconMetrics.lfFont;
-                if (lf.lfFaceName == null || lf.lfFaceName.Length == 0)
-                    return new Font("Segoe UI", 9f);
+                string familyName = currentTheme != null &&
+                    !string.IsNullOrWhiteSpace(currentTheme.FontFamilyName)
+                        ? currentTheme.FontFamilyName
+                        : lf.lfFaceName;
+                if (string.IsNullOrWhiteSpace(familyName))
+                    familyName = "Segoe UI";
                 // lfHeight 是逻辑单位，需要转换为磅值（point）
                 float fontSize = Math.Abs(lf.lfHeight);
                 using (var g = CreateGraphics())
@@ -253,7 +263,7 @@ namespace NoFences
                 if (lf.lfWeight >= 700) style |= FontStyle.Bold;
                 if (lf.lfUnderline != 0) style |= FontStyle.Underline;
                 if (lf.lfStrikeOut != 0) style |= FontStyle.Strikeout;
-                return new Font(lf.lfFaceName, fontSize, style);
+                return new Font(familyName, fontSize, style);
             }
             catch
             {
@@ -267,21 +277,36 @@ namespace NoFences
         /// </summary>
         private void ReloadFonts()
         {
-            var family = new FontFamily("Segoe UI");
             titleFont?.Dispose();
             iconFont?.Dispose();
-            titleFont = new Font(family, (int)Math.Floor(logicalTitleHeight / 2.0));
+
+            string familyName = currentTheme != null &&
+                !string.IsNullOrWhiteSpace(currentTheme.FontFamilyName)
+                    ? currentTheme.FontFamilyName
+                    : "Segoe UI";
+            float titleSize = Math.Max(8f, (float)Math.Floor(logicalTitleHeight / 2.0));
+            try
+            {
+                titleFont = new Font(familyName, titleSize, FontStyle.Regular);
+            }
+            catch
+            {
+                titleFont = new Font("Segoe UI", titleSize, FontStyle.Regular);
+            }
             iconFont = CreateIconFontFromLogFont();
         }
 
         public FenceWindow(FenceInfo fenceInfo)
         {
+            this.fenceInfo = fenceInfo ?? throw new ArgumentNullException(nameof(fenceInfo));
+            currentTheme = ThemeManager.Instance.CurrentTheme;
+
             // 先初始化组件以创建窗口句柄（后续 DPI 相关操作需要 Handle）
             InitializeComponent();
+            themeToolStripMenuItem.Text = ThemeText.ThemeMenu;
 
             // 应用 Windows 视觉效果
             DropShadow.ApplyShadows(this);      // DWM 原生窗口阴影
-            BlurUtil.EnableBlur(Handle);        // Acrylic 背景模糊
             WindowUtil.HideFromAltTab(Handle);  // 从 Alt+Tab 隐藏
             DesktopUtil.GlueToDesktop(Handle);  // 粘附到桌面 Progman 窗口
 
@@ -319,7 +344,6 @@ namespace NoFences
 
             AllowDrop = true; // 允许拖放文件到栅栏
 
-            this.fenceInfo = fenceInfo;
             Text = fenceInfo.Name;
             Location = new Point(fenceInfo.PosX, fenceInfo.PosY);
 
@@ -329,7 +353,76 @@ namespace NoFences
             prevHeight = Height;
             lockedToolStripMenuItem.Checked = fenceInfo.Locked;
             minifyToolStripMenuItem.Checked = fenceInfo.CanMinify;
+
+            ThemeManager.Instance.ThemeChanged += ThemeManager_ThemeChanged;
+            ApplyTheme(currentTheme);
             Minify(); // 初始应用最小化状态
+        }
+
+        /// <summary>
+        /// 将全局主题应用到当前栅栏。位置、大小、锁定状态和文件列表等业务数据
+        /// 不属于主题，因此切换主题时不会修改这些持久化信息。
+        /// </summary>
+        private void ApplyTheme(ThemeDefinition theme)
+        {
+            currentTheme = (theme ?? ThemePresets.CreateWindows11()).Clone();
+            currentTheme.Normalize();
+
+            BackColor = currentTheme.MainPanelColor;
+            ThemeUi.ApplyToContextMenu(appContextMenu, currentTheme);
+            BlurUtil.SetBlur(Handle, currentTheme.EnableBlur);
+            ReloadBackgroundImage();
+            ReloadFonts();
+            UpdateRoundedRegion();
+            Invalidate(true);
+        }
+
+        private void ThemeManager_ThemeChanged(object sender, EventArgs e)
+        {
+            if (IsDisposed || Disposing)
+                return;
+
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => ApplyTheme(ThemeManager.Instance.CurrentTheme)));
+                return;
+            }
+
+            ApplyTheme(ThemeManager.Instance.CurrentTheme);
+        }
+
+        /// <summary>
+        /// 创建背景图片的内存副本，避免程序运行期间持续锁定用户选择的文件。
+        /// </summary>
+        private void ReloadBackgroundImage()
+        {
+            backgroundImage?.Dispose();
+            backgroundImage = ThemeDrawing.LoadImageWithoutLock(currentTheme.BackgroundImagePath);
+        }
+
+        /// <summary>
+        /// Form.Region 同时决定绘制轮廓与鼠标命中区域。圆角按当前 DPI 缩放，
+        /// 从而在不同显示器上保持相同的视觉尺寸。
+        /// </summary>
+        private void UpdateRoundedRegion()
+        {
+            Region oldRegion = Region;
+            if (currentTheme == null || currentTheme.CornerRadius <= 0 ||
+                Width <= 1 || Height <= 1)
+            {
+                Region = null;
+            }
+            else
+            {
+                int radius = LogicalPixelsToDevice(currentTheme.CornerRadius);
+                using (var path = ThemeDrawing.CreateRoundedRectangle(
+                    new RectangleF(0, 0, Width, Height),
+                    radius))
+                {
+                    Region = new Region(path);
+                }
+            }
+            oldRegion?.Dispose();
         }
 
         /// <summary>
@@ -503,6 +596,8 @@ namespace NoFences
         /// <summary>窗口大小变化：节流保存新尺寸（4 秒延迟）。</summary>
         private void FenceWindow_Resize(object sender, EventArgs e)
         {
+            UpdateRoundedRegion();
+
             throttledResize.Run(() =>
             {
                 fenceInfo.Width = Width;
@@ -577,31 +672,70 @@ namespace NoFences
         }
 
         /// <summary>
+        /// FenceWindow_Paint 会覆盖整个客户区。跳过 WinForms 默认的纯色背景擦除，
+        /// 才能让带透明度的主题背景交给 DWM 模糊合成，而不是先被压平。
+        /// </summary>
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+        }
+
+        /// <summary>
         /// 主渲染方法。所有 GDI+ 绘制在此完成（未启用 DoubleBuffered，
         /// 因为手动渲染依赖当前绘制周期处理鼠标命中测试）。
         /// 绘制顺序：背景 → 标题栏 → 条目网格 → 滚动条 → 点击/悬停处理。
         /// </summary>
         private void FenceWindow_Paint(object sender, PaintEventArgs e)
         {
-            e.Graphics.Clip = new Region(ClientRectangle);
+            var theme = currentTheme ?? ThemePresets.CreateWindows11();
+            e.Graphics.SetClip(ClientRectangle);
             e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
             e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
             e.Graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
 
-            // 背景：半透明黑色
-            e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(100, Color.Black)), ClientRectangle);
+            // 主面板颜色、透明度与背景图片均来自当前主题。
+            using (var backgroundBrush = new SolidBrush(ThemeDrawing.WithOpacity(
+                theme.MainPanelColor,
+                theme.MainPanelOpacityPercent)))
+            {
+                e.Graphics.FillRectangle(backgroundBrush, ClientRectangle);
+            }
+            ThemeDrawing.DrawBackgroundImage(
+                e.Graphics,
+                backgroundImage,
+                ClientRectangle,
+                theme.BackgroundImageLayout,
+                theme.BackgroundImageOpacityPercent);
 
-            // 标题栏：居中文本 + 半透明黑色叠加
-            e.Graphics.DrawString(Text, titleFont, Brushes.White, new PointF(Width / 2, titleOffset), new StringFormat { Alignment = StringAlignment.Center });
-            e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(50, Color.Black)), new RectangleF(0, 0, Width, titleHeight));
+            // 标题背景先于标题文字绘制，避免降低文字本身的不透明度。
+            using (var titleBrush = new SolidBrush(ThemeDrawing.WithOpacity(
+                theme.TitleBarColor,
+                theme.TitleBarOpacityPercent)))
+            {
+                e.Graphics.FillRectangle(
+                    titleBrush,
+                    new RectangleF(0, 0, Width, titleHeight));
+            }
+            using (var titleTextBrush = new SolidBrush(theme.TitleTextColor))
+            using (var titleFormat = new StringFormat { Alignment = StringAlignment.Center })
+            {
+                e.Graphics.DrawString(
+                    Text,
+                    titleFont,
+                    titleTextBrush,
+                    new PointF(Width / 2f, titleOffset),
+                    titleFormat);
+            }
 
             // 条目网格布局：从左到右、从上到下排列
             var x = itemPadding;
             var y = itemPadding;
             scrollHeight = 0;
-            e.Graphics.Clip = new Region(new Rectangle(0, titleHeight, Width, Height - titleHeight));
+            var contentState = e.Graphics.Save();
+            e.Graphics.SetClip(
+                new Rectangle(0, titleHeight, Width, Math.Max(0, Height - titleHeight)),
+                System.Drawing.Drawing2D.CombineMode.Intersect);
             // 记录选中条目（仅当文字超过标准 2 行高度时才需要展开渲染）
             string expandEntryName = null;
             int expandEntryX = 0, expandEntryY = 0;
@@ -667,8 +801,14 @@ namespace NoFences
                 var expandOutlineRect = new Rectangle(expandEntryX - 2, expandEntryY - 2,
                     itemWidth + 2, iconSize + (int)drawHeight + gap + 2);
                 var expandOutlineRectInner = expandOutlineRect.Shrink(1);
-                e.Graphics.DrawRectangle(new Pen(Color.FromArgb(120, SystemColors.ActiveBorder)), expandOutlineRectInner);
-                e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(80, SystemColors.GradientInactiveCaption)), expandOutlineRect);
+                using (var selectedBrush = new SolidBrush(
+                    ThemeDrawing.WithAlpha(theme.ItemSelectedColor, 115)))
+                using (var selectedPen = new Pen(
+                    ThemeDrawing.WithAlpha(theme.BorderColor, 190)))
+                {
+                    e.Graphics.FillRectangle(selectedBrush, expandOutlineRect);
+                    e.Graphics.DrawRectangle(selectedPen, expandOutlineRectInner);
+                }
 
                 // 重绘图标（图层在最上方，防止被高亮框覆盖变模糊）
                 var expandIcon = expandEntry?.ExtractIcon(thumbnailProvider);
@@ -679,14 +819,23 @@ namespace NoFences
                 }
 
                 // 绘制文字阴影
-                e.Graphics.DrawString(expandEntryName, iconFont,
-                    new SolidBrush(Color.FromArgb(180, 15, 15, 15)),
-                    new RectangleF(expandTextPos.Move(shadowDist, shadowDist), drawSize),
-                    expandFormat);
-                // 绘制白色前景文字
-                e.Graphics.DrawString(expandEntryName, iconFont, Brushes.White,
-                    new RectangleF(expandTextPos, drawSize),
-                    expandFormat);
+                using (var shadowBrush = new SolidBrush(
+                    ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 180)))
+                using (var textBrush = new SolidBrush(theme.ItemTextColor))
+                {
+                    e.Graphics.DrawString(
+                        expandEntryName,
+                        iconFont,
+                        shadowBrush,
+                        new RectangleF(expandTextPos.Move(shadowDist, shadowDist), drawSize),
+                        expandFormat);
+                    e.Graphics.DrawString(
+                        expandEntryName,
+                        iconFont,
+                        textBrush,
+                        new RectangleF(expandTextPos, drawSize),
+                        expandFormat);
+                }
 
                 // 鼠标悬浮时叠加高亮（使用与展开高亮框一致的尺寸，降低透明度让选中态更明显）
                 var expandMousePos = PointToClient(MousePosition);
@@ -694,9 +843,18 @@ namespace NoFences
                     expandMousePos.X < expandEntryX + itemWidth + 2 &&
                     expandMousePos.Y < expandEntryY + iconSize + (int)drawHeight + gap + 2)
                 {
-                    // 悬浮时降低高亮框透明度：用更低的 alpha 叠加一层，使整体看起来更亮更通透
-                    e.Graphics.DrawRectangle(new Pen(Color.FromArgb(40, SystemColors.ActiveBorder)), expandOutlineRectInner);
-                    e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(30, Color.White)), expandOutlineRect);
+                    Color combinedColor = ThemeDrawing.Mix(
+                        theme.ItemSelectedColor,
+                        theme.ItemHoverColor,
+                        0.35f);
+                    using (var hoverBrush = new SolidBrush(
+                        ThemeDrawing.WithAlpha(combinedColor, 45)))
+                    using (var hoverPen = new Pen(
+                        ThemeDrawing.WithAlpha(theme.BorderColor, 80)))
+                    {
+                        e.Graphics.FillRectangle(hoverBrush, expandOutlineRect);
+                        e.Graphics.DrawRectangle(hoverPen, expandOutlineRectInner);
+                    }
                 }
             }
 
@@ -717,14 +875,37 @@ namespace NoFences
                 int scrollbarTravel = contentHeight - scrollbarHeight;
                 int scrollbarY = titleHeight + (int)Math.Round(
                     scrollOffset / (double)scrollHeight * scrollbarTravel);
-                e.Graphics.FillRectangle(
-                    new SolidBrush(Color.FromArgb(150, Color.Black)),
-                    new Rectangle(Width - 5, scrollbarY, 5, scrollbarHeight));
+                using (var scrollbarBrush = new SolidBrush(
+                    ThemeDrawing.WithAlpha(theme.ScrollBarColor, 190)))
+                {
+                    e.Graphics.FillRectangle(
+                        scrollbarBrush,
+                        new Rectangle(Math.Max(0, Width - 5), scrollbarY, 5, scrollbarHeight));
+                }
             }
 
 
 
             //  单击/双击处理标志重置（这些标志在 Paint 周期中执行实际操作）
+            e.Graphics.Restore(contentState);
+
+            // Draw a themed outline using the same radius as the actual window region.
+            float borderRadius = theme.CornerRadius > 0
+                ? LogicalPixelsToDevice(theme.CornerRadius)
+                : 0;
+            using (var borderPath = ThemeDrawing.CreateRoundedRectangle(
+                new RectangleF(
+                    0.5f,
+                    0.5f,
+                    Math.Max(0, Width - 1f),
+                    Math.Max(0, Height - 1f)),
+                borderRadius))
+            using (var borderPen = new Pen(
+                ThemeDrawing.WithAlpha(theme.BorderColor, 125)))
+            {
+                e.Graphics.DrawPath(borderPen, borderPath);
+            }
+
             if (shouldUpdateSelection && !hasSelectionUpdated)
                 selectedItem = null;
 
@@ -743,6 +924,7 @@ namespace NoFences
         /// </summary>
         private void RenderEntry(Graphics g, FenceEntry entry, int x, int y, bool skipText = false)
         {
+            var theme = currentTheme ?? ThemePresets.CreateWindows11();
             var icon = entry.ExtractIcon(thumbnailProvider);
             var name = entry.Name;
 
@@ -788,30 +970,38 @@ namespace NoFences
             }
 
             // 绘制选中/悬停背景
-            if (selectedItem == entry.Path)
+            bool selected = selectedItem == entry.Path;
+            if (!skipText && (selected || mouseOver))
             {
-                if (skipText)
+                Color stateColor;
+                int stateAlpha;
+                if (selected && mouseOver)
                 {
-                    // 需要展开的选中条目：高亮框和悬浮叠加均在循环后根据展开高度绘制，此处不做任何绘制
+                    stateColor = ThemeDrawing.Mix(
+                        theme.ItemSelectedColor,
+                        theme.ItemHoverColor,
+                        0.35f);
+                    stateAlpha = 145;
+                }
+                else if (selected)
+                {
+                    stateColor = theme.ItemSelectedColor;
+                    stateAlpha = 115;
                 }
                 else
                 {
-                    // 一行文本的选中条目：在此正常绘制高亮框
-                    g.DrawRectangle(new Pen(Color.FromArgb(120, SystemColors.ActiveBorder)), outlineRectInner);
-                    g.FillRectangle(new SolidBrush(Color.FromArgb(80, SystemColors.GradientInactiveCaption)), outlineRect);
-                    if (mouseOver)
-                    {
-                        g.DrawRectangle(new Pen(Color.FromArgb(120, SystemColors.ActiveBorder)), outlineRectInner);
-                        g.FillRectangle(new SolidBrush(Color.FromArgb(100, SystemColors.GradientActiveCaption)), outlineRect);
-                    }
+                    stateColor = theme.ItemHoverColor;
+                    stateAlpha = 95;
                 }
-            }
-            else
-            {
-                if (mouseOver)
+
+                using (var stateBrush = new SolidBrush(
+                    ThemeDrawing.WithAlpha(stateColor, stateAlpha)))
+                using (var statePen = new Pen(ThemeDrawing.WithAlpha(
+                    theme.BorderColor,
+                    selected ? 190 : 145)))
                 {
-                    g.DrawRectangle(new Pen(Color.FromArgb(120, SystemColors.ActiveBorder)), outlineRectInner);
-                    g.FillRectangle(new SolidBrush(Color.FromArgb(80, SystemColors.ActiveCaption)), outlineRect);
+                    g.FillRectangle(stateBrush, outlineRect);
+                    g.DrawRectangle(statePen, outlineRectInner);
                 }
             }
 
@@ -824,8 +1014,23 @@ namespace NoFences
                 return;
 
             // 绘制文字（先画阴影偏移，再画白色前景）
-            g.DrawString(name, iconFont, new SolidBrush(Color.FromArgb(180, 15, 15, 15)), new RectangleF(textPosition.Move(shadowDist, shadowDist), textMaxSize), stringFormat);
-            g.DrawString(name, iconFont, Brushes.White, new RectangleF(textPosition, textMaxSize), stringFormat);
+            using (var shadowBrush = new SolidBrush(
+                ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 180)))
+            using (var textBrush = new SolidBrush(theme.ItemTextColor))
+            {
+                g.DrawString(
+                    name,
+                    iconFont,
+                    shadowBrush,
+                    new RectangleF(textPosition.Move(shadowDist, shadowDist), textMaxSize),
+                    stringFormat);
+                g.DrawString(
+                    name,
+                    iconFont,
+                    textBrush,
+                    new RectangleF(textPosition, textMaxSize),
+                    stringFormat);
+            }
         }
 
         /// <summary>
@@ -862,9 +1067,30 @@ namespace NoFences
             FenceManager.Instance.CreateFence("New fence");
         }
 
+        /// <summary>打开全局主题配置面板。</summary>
+        private void themeToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            using (var dialog = new ThemeConfigurationDialog())
+            {
+                dialog.ShowDialog(this);
+            }
+        }
+
         /// <summary>窗口关闭：如果最后一个栅栏关闭则退出应用。</summary>
         private void FenceWindow_FormClosed(object sender, FormClosedEventArgs e)
         {
+            ThemeManager.Instance.ThemeChanged -= ThemeManager_ThemeChanged;
+            thumbnailProvider.IconThumbnailLoaded -= ThumbnailProvider_IconThumbnailLoaded;
+            iconMetricsPollTimer.Stop();
+            iconMetricsPollTimer.Dispose();
+
+            backgroundImage?.Dispose();
+            backgroundImage = null;
+            titleFont?.Dispose();
+            titleFont = null;
+            iconFont?.Dispose();
+            iconFont = null;
+
             if (Application.OpenForms.Count == 0)
                 Application.Exit();
         }

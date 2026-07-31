@@ -2,7 +2,7 @@
 using System;
 using System.Threading;
 using System.Windows.Forms;
-using NoFences.Win32;
+using NoFences.Theming;
 
 namespace NoFences
 {
@@ -18,8 +18,8 @@ namespace NoFences
         [STAThread]
         static void Main()
         {
-            // 设置上下文菜单为深色模式（继承系统主题设置）
-            WindowUtil.SetPreferredAppMode(1);
+            // 在创建任何窗口前加载主题；同时设置原生菜单的明暗模式。
+            ThemeManager.Initialize();
 
             // 通过命名 Mutex 确保单实例运行
             using (var mutex = new Mutex(true, "No_fences", out var createdNew))

@@ -1,12 +1,13 @@
 ﻿using System;
 using System.Windows.Forms;
+using NoFences.Theming;
 
 namespace NoFences
 {
     /// <summary>
     /// 重命名对话框。用于修改栅栏或条目的名称。
     /// </summary>
-    public partial class EditDialog : Form
+    public partial class EditDialog : ThemeAwareForm
     {
         /// <summary>用户输入的新名称</summary>
         public string NewName => tbName.Text;
