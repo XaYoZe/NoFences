@@ -20,6 +20,16 @@ namespace NoFences.Theming
 
         public static void ApplyToForm(Form form, ThemeDefinition theme)
         {
+            ApplyToForm(form, theme, ThemeManager.Instance.DarkModeEnabled);
+        }
+
+        /// <summary>
+        /// Applies a palette and an explicit color mode. The overload is needed by
+        /// the configuration preview: its switch may differ from the committed
+        /// application setting until the user presses Apply or OK.
+        /// </summary>
+        public static void ApplyToForm(Form form, ThemeDefinition theme, bool darkModeEnabled)
+        {
             if (form == null || theme == null)
                 return;
 
@@ -29,7 +39,7 @@ namespace NoFences.Theming
             ApplyToChildren(form.Controls, theme);
 
             if (form.IsHandleCreated)
-                WindowUtil.TrySetImmersiveDarkMode(form.Handle, ThemeDrawing.IsDark(theme.DialogBackgroundColor));
+                WindowUtil.TrySetImmersiveDarkMode(form.Handle, darkModeEnabled);
             form.Invalidate(true);
         }
 

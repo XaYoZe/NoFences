@@ -304,6 +304,8 @@ namespace NoFences
             // 先初始化组件以创建窗口句柄（后续 DPI 相关操作需要 Handle）
             InitializeComponent();
             themeToolStripMenuItem.Text = ThemeText.ThemeMenu;
+            darkModeToolStripMenuItem.Text = ThemeText.DarkMode;
+            darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
 
             // 应用 Windows 视觉效果
             DropShadow.ApplyShadows(this);      // DWM 原生窗口阴影
@@ -370,6 +372,7 @@ namespace NoFences
 
             BackColor = currentTheme.MainPanelColor;
             ThemeUi.ApplyToContextMenu(appContextMenu, currentTheme);
+            darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
             BlurUtil.SetBlur(Handle, currentTheme.EnableBlur);
             ReloadBackgroundImage();
             ReloadFonts();
@@ -573,6 +576,7 @@ namespace NoFences
         private void contextMenuStrip1_Opening(object sender, System.ComponentModel.CancelEventArgs e)
         {
             deleteItemToolStripMenuItem.Visible = hoveringItem != null;
+            darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
         }
 
         /// <summary>拖放进入：仅接受文件拖放（锁定状态下拒绝）。</summary>
@@ -1074,6 +1078,15 @@ namespace NoFences
             {
                 dialog.ShowDialog(this);
             }
+        }
+
+        /// <summary>
+        /// 独立切换应用颜色模式。这里只更新 DarkModeEnabled；当前 Win11、XP
+        /// 或自定义风格 ID 保持不变，由 ThemeManager 解析该风格对应的颜色变体。
+        /// </summary>
+        private void darkModeToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            ThemeManager.Instance.SetDarkMode(darkModeToolStripMenuItem.Checked);
         }
 
         /// <summary>窗口关闭：如果最后一个栅栏关闭则退出应用。</summary>

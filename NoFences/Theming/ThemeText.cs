@@ -17,5 +17,7 @@ namespace NoFences.Theming
         }
 
         public static string ThemeMenu => Get("主题风格...", "Theme...");
+
+        public static string DarkMode => Get("黑暗模式", "Dark mode");
     }
 }

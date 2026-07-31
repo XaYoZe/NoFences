@@ -8,21 +8,40 @@ using System.Xml.Serialization;
 namespace NoFences.Theming
 {
     /// <summary>
-    /// XML document stored separately from FenceInfo metadata. Theme selection is
-    /// application-wide, while FenceInfo remains backward compatible with every
-    /// existing user's per-fence XML file.
+    /// XML document stored separately from FenceInfo metadata. Theme selection and
+    /// color mode are application-wide, while FenceInfo remains backward compatible
+    /// with every existing user's per-fence XML file.
     /// </summary>
     [Serializable]
     public sealed class ThemeSettings
     {
         public string SelectedThemeId { get; set; } = ThemeIds.Windows11;
 
-        public ThemeDefinition CustomTheme { get; set; } = ThemePresets.CreateDefaultCustom();
+        /// <summary>
+        /// Independent application color-mode switch.  It must never be inferred
+        /// from SelectedThemeId; Windows 11 and Windows XP both support both modes.
+        /// </summary>
+        public bool DarkModeEnabled { get; set; }
+
+        /// <summary>
+        /// Light custom variant.  The XML name remains CustomTheme so settings from
+        /// the first theming release remain readable without a migration schema.
+        /// </summary>
+        public ThemeDefinition CustomTheme { get; set; } =
+            ThemePresets.CreateDefaultCustom(ThemeColorMode.Light);
+
+        /// <summary>
+        /// Dark custom variant.  Keeping a variant per mode lets users edit exact
+        /// colors instead of applying a lossy automatic inversion to their palette.
+        /// </summary>
+        public ThemeDefinition CustomDarkTheme { get; set; } =
+            ThemePresets.CreateDefaultCustom(ThemeColorMode.Dark);
     }
 
     /// <summary>
     /// Central registry, persistence service, and change notification source for
     /// themes. UI code asks only for CurrentTheme and listens for ThemeChanged.
+    /// Theme identity and Light/Dark mode are stored and resolved independently.
     /// </summary>
     public sealed class ThemeManager
     {
@@ -39,11 +58,13 @@ namespace NoFences.Theming
             RegisterThemeInternal(new StaticThemeProvider(
                 ThemeIds.Windows11,
                 "Windows 11",
-                ThemePresets.CreateWindows11()));
+                ThemePresets.CreateWindows11(ThemeColorMode.Light),
+                ThemePresets.CreateWindows11(ThemeColorMode.Dark)));
             RegisterThemeInternal(new StaticThemeProvider(
                 ThemeIds.WindowsXp,
                 "Windows XP",
-                ThemePresets.CreateWindowsXp()));
+                ThemePresets.CreateWindowsXp(ThemeColorMode.Light),
+                ThemePresets.CreateWindowsXp(ThemeColorMode.Dark)));
 
             var basePath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -51,9 +72,9 @@ namespace NoFences.Theming
             settingsPath = Path.Combine(basePath, SettingsFileName);
             settings = LoadSettings();
 
-            // Native shell menus cannot use arbitrary application colors. We can
-            // still request their closest dark/light system rendering.
-            WindowUtil.TrySetPreferredAppMode(CurrentTheme.PreferDarkNativeMenus);
+            // Native shell menus cannot use arbitrary application colors. They
+            // follow the independent global mode rather than a theme definition.
+            WindowUtil.TrySetPreferredAppMode(settings.DarkModeEnabled);
         }
 
         public static ThemeManager Instance { get; } = new ThemeManager();
@@ -64,7 +85,7 @@ namespace NoFences.Theming
         /// </summary>
         public static void Initialize()
         {
-            WindowUtil.TrySetPreferredAppMode(Instance.CurrentTheme.PreferDarkNativeMenus);
+            WindowUtil.TrySetPreferredAppMode(Instance.DarkModeEnabled);
         }
 
         public event EventHandler ThemeChanged;
@@ -78,21 +99,53 @@ namespace NoFences.Theming
             }
         }
 
+        public bool DarkModeEnabled
+        {
+            get
+            {
+                lock (syncRoot)
+                    return settings.DarkModeEnabled;
+            }
+        }
+
+        public ThemeColorMode CurrentColorMode =>
+            DarkModeEnabled ? ThemeColorMode.Dark : ThemeColorMode.Light;
+
         public ThemeDefinition CurrentTheme
         {
             get
             {
                 lock (syncRoot)
-                    return ResolveThemeInternal(settings.SelectedThemeId, settings.CustomTheme);
+                {
+                    return ResolveThemeInternal(
+                        settings.SelectedThemeId,
+                        ToColorMode(settings.DarkModeEnabled),
+                        settings.CustomTheme,
+                        settings.CustomDarkTheme);
+                }
             }
         }
 
-        public ThemeDefinition CustomTheme
+        /// <summary>
+        /// Backward-compatible alias for the light custom variant.
+        /// </summary>
+        public ThemeDefinition CustomTheme => CustomLightTheme;
+
+        public ThemeDefinition CustomLightTheme
         {
             get
             {
                 lock (syncRoot)
                     return settings.CustomTheme.Clone();
+            }
+        }
+
+        public ThemeDefinition CustomDarkTheme
+        {
+            get
+            {
+                lock (syncRoot)
+                    return settings.CustomDarkTheme.Clone();
             }
         }
 
@@ -123,40 +176,101 @@ namespace NoFences.Theming
                 RegisterThemeInternal(provider);
         }
 
+        /// <summary>
+        /// Resolves a style using the currently selected color mode.
+        /// </summary>
         public ThemeDefinition GetTheme(string themeId)
         {
             lock (syncRoot)
-                return ResolveThemeInternal(themeId, settings.CustomTheme);
+            {
+                return ResolveThemeInternal(
+                    themeId,
+                    ToColorMode(settings.DarkModeEnabled),
+                    settings.CustomTheme,
+                    settings.CustomDarkTheme);
+            }
         }
 
         /// <summary>
-        /// Atomically updates both the saved custom definition and active theme.
-        /// Saving the custom definition even when a preset is selected preserves
-        /// edits when the user switches back to Custom later.
+        /// Resolves any style/mode combination for configuration previews without
+        /// changing application state.
         /// </summary>
-        public void ApplySelection(string themeId, ThemeDefinition customTheme)
+        public ThemeDefinition GetTheme(string themeId, ThemeColorMode colorMode)
         {
-            ThemeDefinition activeTheme;
+            lock (syncRoot)
+            {
+                return ResolveThemeInternal(
+                    themeId,
+                    colorMode,
+                    settings.CustomTheme,
+                    settings.CustomDarkTheme);
+            }
+        }
+
+        /// <summary>
+        /// Atomically saves the selected style, independent color mode, and both
+        /// custom variants. Saving both custom variants even when a preset is active
+        /// preserves edits when the user later switches back to Custom.
+        /// </summary>
+        public void ApplySelection(
+            string themeId,
+            ThemeDefinition customLightTheme,
+            ThemeDefinition customDarkTheme,
+            bool darkModeEnabled)
+        {
             lock (syncRoot)
             {
                 if (!IsKnownThemeInternal(themeId))
                     themeId = ThemeIds.Windows11;
 
-                if (customTheme != null)
-                {
-                    customTheme = customTheme.Clone();
-                    customTheme.Name = "Custom";
-                    customTheme.Normalize();
-                    settings.CustomTheme = customTheme;
-                }
+                if (customLightTheme != null)
+                    settings.CustomTheme = PrepareCustomTheme(customLightTheme);
+                if (customDarkTheme != null)
+                    settings.CustomDarkTheme = PrepareCustomTheme(customDarkTheme);
 
                 settings.SelectedThemeId = themeId;
+                settings.DarkModeEnabled = darkModeEnabled;
                 SaveSettings(settings);
-                activeTheme = ResolveThemeInternal(themeId, settings.CustomTheme);
             }
 
-            WindowUtil.TrySetPreferredAppMode(activeTheme.PreferDarkNativeMenus);
+            NotifyThemeChanged(darkModeEnabled);
+        }
+
+        /// <summary>
+        /// Changes only the global color mode. This is used by the right-click menu
+        /// switch and intentionally leaves the selected visual style untouched.
+        /// </summary>
+        public void SetDarkMode(bool enabled)
+        {
+            lock (syncRoot)
+            {
+                if (settings.DarkModeEnabled == enabled)
+                    return;
+
+                settings.DarkModeEnabled = enabled;
+                SaveSettings(settings);
+            }
+
+            NotifyThemeChanged(enabled);
+        }
+
+        private void NotifyThemeChanged(bool darkModeEnabled)
+        {
+            WindowUtil.TrySetPreferredAppMode(darkModeEnabled);
             ThemeChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        private static ThemeColorMode ToColorMode(bool darkModeEnabled)
+        {
+            return darkModeEnabled ? ThemeColorMode.Dark : ThemeColorMode.Light;
+        }
+
+        private static ThemeDefinition PrepareCustomTheme(ThemeDefinition source)
+        {
+            var result = source.Clone();
+            result.Name = "Custom";
+            result.Normalize();
+            return result;
         }
 
         private void RegisterThemeInternal(IThemeProvider provider)
@@ -172,22 +286,30 @@ namespace NoFences.Theming
                    (!string.IsNullOrWhiteSpace(themeId) && providers.ContainsKey(themeId));
         }
 
-        private ThemeDefinition ResolveThemeInternal(string themeId, ThemeDefinition customTheme)
+        private ThemeDefinition ResolveThemeInternal(
+            string themeId,
+            ThemeColorMode colorMode,
+            ThemeDefinition customLightTheme,
+            ThemeDefinition customDarkTheme)
         {
             ThemeDefinition result;
             if (string.Equals(themeId, ThemeIds.Custom, StringComparison.OrdinalIgnoreCase))
             {
-                result = customTheme != null
-                    ? customTheme.Clone()
-                    : ThemePresets.CreateDefaultCustom();
+                var custom = colorMode == ThemeColorMode.Dark
+                    ? customDarkTheme
+                    : customLightTheme;
+                result = custom != null
+                    ? custom.Clone()
+                    : ThemePresets.CreateDefaultCustom(colorMode);
             }
-            else if (!string.IsNullOrWhiteSpace(themeId) && providers.TryGetValue(themeId, out var provider))
+            else if (!string.IsNullOrWhiteSpace(themeId) &&
+                     providers.TryGetValue(themeId, out var provider))
             {
-                result = provider.CreateTheme();
+                result = provider.CreateTheme(colorMode);
             }
             else
             {
-                result = ThemePresets.CreateWindows11();
+                result = ThemePresets.CreateWindows11(colorMode);
             }
 
             result.Normalize();
@@ -201,20 +323,65 @@ namespace NoFences.Theming
                 if (!File.Exists(settingsPath))
                     return new ThemeSettings();
 
-                var serializer = new XmlSerializer(typeof(ThemeSettings));
-                using (var stream = new FileStream(settingsPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                {
-                    var loaded = serializer.Deserialize(stream) as ThemeSettings;
-                    if (loaded == null)
-                        return new ThemeSettings();
+                // Reading the XML text first lets us distinguish a genuinely saved
+                // false value from a legacy file that predates DarkModeEnabled.
+                string serializedSettings = File.ReadAllText(settingsPath);
+                bool hasIndependentColorMode = serializedSettings.IndexOf(
+                    "<DarkModeEnabled>",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
 
-                    if (loaded.CustomTheme == null)
-                        loaded.CustomTheme = ThemePresets.CreateDefaultCustom();
-                    loaded.CustomTheme.Normalize();
-                    if (!IsKnownThemeInternal(loaded.SelectedThemeId))
-                        loaded.SelectedThemeId = ThemeIds.Windows11;
-                    return loaded;
+                var serializer = new XmlSerializer(typeof(ThemeSettings));
+                ThemeSettings loaded;
+                using (var reader = new StringReader(serializedSettings))
+                    loaded = serializer.Deserialize(reader) as ThemeSettings;
+
+                if (loaded == null)
+                    return new ThemeSettings();
+
+                if (loaded.CustomTheme == null)
+                    loaded.CustomTheme = ThemePresets.CreateDefaultCustom(ThemeColorMode.Light);
+
+                if (!hasIndependentColorMode)
+                {
+                    // Version 1 stored one mostly-dark custom palette because its
+                    // Windows 11 preset implicitly meant dark. Preserve that palette
+                    // as the new dark custom variant and create a true light variant.
+                    bool legacyCustomWasDark =
+                        ThemeDrawing.IsDark(loaded.CustomTheme.DialogBackgroundColor);
+                    if (legacyCustomWasDark)
+                    {
+                        loaded.CustomDarkTheme = loaded.CustomTheme.Clone();
+                        loaded.CustomTheme = ThemePresets.CreateDefaultCustom(ThemeColorMode.Light);
+                    }
+                    else
+                    {
+                        loaded.CustomDarkTheme =
+                            ThemePresets.CreateDefaultCustom(ThemeColorMode.Dark);
+                    }
+
+                    // Preserve the user's visible appearance during migration, but
+                    // represent it explicitly as style + mode from this point on.
+                    loaded.DarkModeEnabled =
+                        string.Equals(
+                            loaded.SelectedThemeId,
+                            ThemeIds.Windows11,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        (string.Equals(
+                            loaded.SelectedThemeId,
+                            ThemeIds.Custom,
+                            StringComparison.OrdinalIgnoreCase) && legacyCustomWasDark);
                 }
+                else if (loaded.CustomDarkTheme == null)
+                {
+                    loaded.CustomDarkTheme =
+                        ThemePresets.CreateDefaultCustom(ThemeColorMode.Dark);
+                }
+
+                loaded.CustomTheme = PrepareCustomTheme(loaded.CustomTheme);
+                loaded.CustomDarkTheme = PrepareCustomTheme(loaded.CustomDarkTheme);
+                if (!IsKnownThemeInternal(loaded.SelectedThemeId))
+                    loaded.SelectedThemeId = ThemeIds.Windows11;
+                return loaded;
             }
             catch
             {

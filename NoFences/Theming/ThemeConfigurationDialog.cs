@@ -15,6 +15,7 @@ namespace NoFences.Theming
     public sealed class ThemeConfigurationDialog : Form
     {
         private readonly ComboBox themeComboBox = new ComboBox();
+        private readonly CheckBox darkModeCheckBox = new CheckBox();
         private readonly Button copyToCustomButton = new Button();
         private readonly Button resetCustomButton = new Button();
         private readonly Button applyButton = new Button();
@@ -26,7 +27,6 @@ namespace NoFences.Theming
         private readonly NumericUpDown titleOpacityInput = new NumericUpDown();
         private readonly NumericUpDown imageOpacityInput = new NumericUpDown();
         private readonly CheckBox blurCheckBox = new CheckBox();
-        private readonly CheckBox darkNativeMenusCheckBox = new CheckBox();
         private readonly TextBox fontFamilyTextBox = new TextBox();
         private readonly TextBox imagePathTextBox = new TextBox();
         private readonly ComboBox imageLayoutComboBox = new ComboBox();
@@ -37,13 +37,19 @@ namespace NoFences.Theming
         private readonly List<ColorEditor> colorEditors = new List<ColorEditor>();
         private readonly List<ImageLayoutChoice> imageLayoutChoices = new List<ImageLayoutChoice>();
 
-        private ThemeDefinition customTheme;
+        private ThemeDefinition customLightTheme;
+        private ThemeDefinition customDarkTheme;
+        private ThemeColorMode loadedEditorColorMode;
         private bool isLoadingEditors;
 
         public ThemeConfigurationDialog()
         {
-            customTheme = ThemeManager.Instance.CustomTheme;
+            customLightTheme = ThemeManager.Instance.CustomLightTheme;
+            customDarkTheme = ThemeManager.Instance.CustomDarkTheme;
             InitializeDialog();
+            isLoadingEditors = true;
+            darkModeCheckBox.Checked = ThemeManager.Instance.DarkModeEnabled;
+            isLoadingEditors = false;
             PopulateThemeChoices();
             LoadSelectedTheme();
         }
@@ -53,7 +59,7 @@ namespace NoFences.Theming
             base.OnShown(e);
             // The native title-bar handle does not exist during construction.
             // Re-applying once shown lets ThemeUi update its dark/light DWM state.
-            ApplyPreviewTheme(GetSelectedDefinition());
+            ApplyPreviewTheme(GetSelectedDefinition(), darkModeCheckBox.Checked);
         }
 
         private string T(string chinese, string english)
@@ -104,6 +110,7 @@ namespace NoFences.Theming
                 Dock = DockStyle.Top,
                 AutoSize = true,
                 ColumnCount = 3,
+                RowCount = 2,
                 Margin = Padding.Empty
             };
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -129,6 +136,18 @@ namespace NoFences.Theming
             copyToCustomButton.AutoSize = true;
             copyToCustomButton.Click += CopyToCustomButton_Click;
             header.Controls.Add(copyToCustomButton, 2, 0);
+
+            // Color mode is intentionally a separate row/control, not another
+            // entry in the theme list. This keeps style identity (Win11/XP/custom)
+            // independent from the application-wide Light/Dark choice.
+            darkModeCheckBox.Text = T(
+                "黑暗模式（独立于主题风格）",
+                "Dark mode (independent of theme style)");
+            darkModeCheckBox.AutoSize = true;
+            darkModeCheckBox.Margin = new Padding(0, 8, 0, 0);
+            darkModeCheckBox.CheckedChanged += DarkModeCheckBox_CheckedChanged;
+            header.Controls.Add(darkModeCheckBox, 0, 1);
+            header.SetColumnSpan(darkModeCheckBox, 3);
             return header;
         }
 
@@ -160,14 +179,10 @@ namespace NoFences.Theming
             blurCheckBox.AutoSize = true;
             AddSpanningRow(layout, blurCheckBox);
 
-            darkNativeMenusCheckBox.Text = T("系统文件右键菜单优先使用深色", "Prefer dark native file context menus");
-            darkNativeMenusCheckBox.AutoSize = true;
-            AddSpanningRow(layout, darkNativeMenusCheckBox);
-
             customHintLabel.AutoSize = true;
             customHintLabel.Text = T(
-                "预置主题只读；点击上方“基于此主题自定义”即可复制后修改。",
-                "Presets are read-only. Use “Customize this theme” to copy and edit one.");
+                "预置主题只读；自定义主题会分别保存浅色与黑暗模式配置。",
+                "Presets are read-only. Custom saves separate Light and Dark variants.");
             customHintLabel.Margin = new Padding(3, 14, 3, 3);
             AddSpanningRow(layout, customHintLabel);
 
@@ -176,10 +191,9 @@ namespace NoFences.Theming
             panelOpacityInput.ValueChanged += CustomValueChanged;
             titleOpacityInput.ValueChanged += CustomValueChanged;
             blurCheckBox.CheckedChanged += CustomValueChanged;
-            darkNativeMenusCheckBox.CheckedChanged += CustomValueChanged;
 
             AddCustomControls(fontFamilyTextBox, cornerRadiusInput, panelOpacityInput,
-                titleOpacityInput, blurCheckBox, darkNativeMenusCheckBox);
+                titleOpacityInput, blurCheckBox);
             return WrapEditor(layout);
         }
 
@@ -417,17 +431,18 @@ namespace NoFences.Theming
 
         private void LoadSelectedTheme()
         {
-            var theme = GetSelectedDefinition();
+            ThemeColorMode colorMode = GetSelectedColorMode();
+            var theme = GetSelectedDefinition(colorMode);
             bool isCustom = IsCustomSelected();
             isLoadingEditors = true;
             try
             {
+                loadedEditorColorMode = colorMode;
                 fontFamilyTextBox.Text = theme.FontFamilyName;
                 cornerRadiusInput.Value = theme.CornerRadius;
                 panelOpacityInput.Value = theme.MainPanelOpacityPercent;
                 titleOpacityInput.Value = theme.TitleBarOpacityPercent;
                 blurCheckBox.Checked = theme.EnableBlur;
-                darkNativeMenusCheckBox.Checked = theme.PreferDarkNativeMenus;
                 imagePathTextBox.Text = theme.BackgroundImagePath;
                 imageOpacityInput.Value = theme.BackgroundImageOpacityPercent;
 
@@ -451,16 +466,34 @@ namespace NoFences.Theming
             foreach (var control in customOnlyControls)
                 control.Enabled = isCustom;
             resetCustomButton.Enabled = isCustom;
+            copyToCustomButton.Enabled = !isCustom;
             customHintLabel.Visible = !isCustom;
-            ApplyPreviewTheme(theme);
+            ApplyPreviewTheme(theme, colorMode == ThemeColorMode.Dark);
         }
 
         private ThemeDefinition GetSelectedDefinition()
         {
+            return GetSelectedDefinition(GetSelectedColorMode());
+        }
+
+        private ThemeDefinition GetSelectedDefinition(ThemeColorMode colorMode)
+        {
             var choice = themeComboBox.SelectedItem as ThemeChoice;
             if (choice == null || string.Equals(choice.Id, ThemeIds.Custom, StringComparison.OrdinalIgnoreCase))
-                return customTheme.Clone();
-            return ThemeManager.Instance.GetTheme(choice.Id);
+                return GetCustomTheme(colorMode).Clone();
+            return ThemeManager.Instance.GetTheme(choice.Id, colorMode);
+        }
+
+        private ThemeColorMode GetSelectedColorMode()
+        {
+            return darkModeCheckBox.Checked ? ThemeColorMode.Dark : ThemeColorMode.Light;
+        }
+
+        private ThemeDefinition GetCustomTheme(ThemeColorMode colorMode)
+        {
+            return colorMode == ThemeColorMode.Dark
+                ? customDarkTheme
+                : customLightTheme;
         }
 
         private bool IsCustomSelected()
@@ -474,12 +507,15 @@ namespace NoFences.Theming
             if (isLoadingEditors || !IsCustomSelected())
                 return;
 
+            // loadedEditorColorMode identifies which custom variant the visible
+            // controls represent. This avoids writing light values into the dark
+            // variant (or vice versa) while the independent switch is changing.
+            var customTheme = GetCustomTheme(loadedEditorColorMode);
             customTheme.FontFamilyName = fontFamilyTextBox.Text.Trim();
             customTheme.CornerRadius = (int)cornerRadiusInput.Value;
             customTheme.MainPanelOpacityPercent = (int)panelOpacityInput.Value;
             customTheme.TitleBarOpacityPercent = (int)titleOpacityInput.Value;
             customTheme.EnableBlur = blurCheckBox.Checked;
-            customTheme.PreferDarkNativeMenus = darkNativeMenusCheckBox.Checked;
             customTheme.BackgroundImagePath = imagePathTextBox.Text.Trim();
             customTheme.BackgroundImageOpacityPercent = (int)imageOpacityInput.Value;
             var layout = imageLayoutComboBox.SelectedItem as ImageLayoutChoice;
@@ -488,9 +524,9 @@ namespace NoFences.Theming
             customTheme.Normalize();
         }
 
-        private void ApplyPreviewTheme(ThemeDefinition theme)
+        private void ApplyPreviewTheme(ThemeDefinition theme, bool darkModeEnabled)
         {
-            ThemeUi.ApplyToForm(this, theme);
+            ThemeUi.ApplyToForm(this, theme, darkModeEnabled);
             // ThemeUi gives ordinary buttons control colors. Color swatches must be
             // restored afterwards so they continue to represent their actual values.
             foreach (var editor in colorEditors)
@@ -513,12 +549,19 @@ namespace NoFences.Theming
                 LoadSelectedTheme();
         }
 
+        private void DarkModeCheckBox_CheckedChanged(object sender, EventArgs e)
+        {
+            if (!isLoadingEditors)
+                LoadSelectedTheme();
+        }
+
         private void CustomValueChanged(object sender, EventArgs e)
         {
             if (isLoadingEditors || !IsCustomSelected())
                 return;
             WriteControlsToCustomTheme();
-            ApplyPreviewTheme(customTheme);
+            var customTheme = GetCustomTheme(loadedEditorColorMode);
+            ApplyPreviewTheme(customTheme, loadedEditorColorMode == ThemeColorMode.Dark);
         }
 
         private void ColorButton_Click(object sender, EventArgs e)
@@ -529,6 +572,7 @@ namespace NoFences.Theming
             var editor = ((Control)sender).Tag as ColorEditor;
             if (editor == null)
                 return;
+            var customTheme = GetCustomTheme(loadedEditorColorMode);
             using (var dialog = new ColorDialog
             {
                 Color = Color.FromArgb(editor.Getter(customTheme)),
@@ -542,7 +586,7 @@ namespace NoFences.Theming
             }
 
             UpdateColorButton(editor, customTheme);
-            ApplyPreviewTheme(customTheme);
+            ApplyPreviewTheme(customTheme, loadedEditorColorMode == ThemeColorMode.Dark);
         }
 
         private void BrowseImageButton_Click(object sender, EventArgs e)
@@ -566,15 +610,24 @@ namespace NoFences.Theming
 
         private void CopyToCustomButton_Click(object sender, EventArgs e)
         {
-            customTheme = GetSelectedDefinition();
-            customTheme.Name = "Custom";
+            var choice = themeComboBox.SelectedItem as ThemeChoice;
+            if (choice == null || string.Equals(choice.Id, ThemeIds.Custom, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            // Copy both variants together. The user can switch modes later and
+            // continue editing without losing the other mode's palette.
+            customLightTheme = ThemeManager.Instance.GetTheme(choice.Id, ThemeColorMode.Light);
+            customDarkTheme = ThemeManager.Instance.GetTheme(choice.Id, ThemeColorMode.Dark);
+            customLightTheme.Name = "Custom";
+            customDarkTheme.Name = "Custom";
             SelectThemeChoice(ThemeIds.Custom);
             LoadSelectedTheme();
         }
 
         private void ResetCustomButton_Click(object sender, EventArgs e)
         {
-            customTheme = ThemePresets.CreateDefaultCustom();
+            customLightTheme = ThemePresets.CreateDefaultCustom(ThemeColorMode.Light);
+            customDarkTheme = ThemePresets.CreateDefaultCustom(ThemeColorMode.Dark);
             LoadSelectedTheme();
         }
 
@@ -595,8 +648,12 @@ namespace NoFences.Theming
             WriteControlsToCustomTheme();
             var choice = themeComboBox.SelectedItem as ThemeChoice;
             string id = choice != null ? choice.Id : ThemeIds.Windows11;
-            ThemeManager.Instance.ApplySelection(id, customTheme);
-            ApplyPreviewTheme(GetSelectedDefinition());
+            ThemeManager.Instance.ApplySelection(
+                id,
+                customLightTheme,
+                customDarkTheme,
+                darkModeCheckBox.Checked);
+            ApplyPreviewTheme(GetSelectedDefinition(), darkModeCheckBox.Checked);
         }
 
         private void SelectThemeChoice(string id)

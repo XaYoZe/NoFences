@@ -19,6 +19,17 @@ namespace NoFences.Theming
     }
 
     /// <summary>
+    /// Application-wide color mode.  It is deliberately separate from a theme
+    /// provider: Windows 11, Windows XP, and future visual styles can all expose
+    /// both a light and a dark palette without duplicating their style identity.
+    /// </summary>
+    public enum ThemeColorMode
+    {
+        Light,
+        Dark
+    }
+
+    /// <summary>
     /// Contains every visual value consumed by the application.
     ///
     /// Colors are stored as ARGB integers because <see cref="XmlSerializer"/>
@@ -34,41 +45,41 @@ namespace NoFences.Theming
 
         public string FontFamilyName { get; set; } = "Segoe UI";
 
-        public int MainPanelColorArgb { get; set; } = Color.FromArgb(32, 32, 32).ToArgb();
+        public int MainPanelColorArgb { get; set; } = Color.FromArgb(243, 243, 243).ToArgb();
 
-        public int TitleBarColorArgb { get; set; } = Color.FromArgb(24, 24, 24).ToArgb();
+        public int TitleBarColorArgb { get; set; } = Color.FromArgb(249, 249, 249).ToArgb();
 
-        public int TitleTextColorArgb { get; set; } = Color.White.ToArgb();
+        public int TitleTextColorArgb { get; set; } = Color.FromArgb(26, 26, 26).ToArgb();
 
-        public int ItemTextColorArgb { get; set; } = Color.White.ToArgb();
+        public int ItemTextColorArgb { get; set; } = Color.FromArgb(26, 26, 26).ToArgb();
 
-        public int ItemTextShadowColorArgb { get; set; } = Color.Black.ToArgb();
+        public int ItemTextShadowColorArgb { get; set; } = Color.White.ToArgb();
 
-        public int ItemHoverColorArgb { get; set; } = Color.FromArgb(61, 111, 158).ToArgb();
+        public int ItemHoverColorArgb { get; set; } = Color.FromArgb(229, 243, 255).ToArgb();
 
         public int ItemSelectedColorArgb { get; set; } = Color.FromArgb(0, 103, 192).ToArgb();
 
-        public int BorderColorArgb { get; set; } = Color.FromArgb(139, 190, 241).ToArgb();
+        public int BorderColorArgb { get; set; } = Color.FromArgb(117, 117, 117).ToArgb();
 
-        public int ScrollBarColorArgb { get; set; } = Color.FromArgb(133, 133, 133).ToArgb();
+        public int ScrollBarColorArgb { get; set; } = Color.FromArgb(138, 138, 138).ToArgb();
 
-        public int MenuBackgroundColorArgb { get; set; } = Color.FromArgb(32, 32, 32).ToArgb();
+        public int MenuBackgroundColorArgb { get; set; } = Color.FromArgb(249, 249, 249).ToArgb();
 
-        public int MenuTextColorArgb { get; set; } = Color.FromArgb(245, 245, 245).ToArgb();
+        public int MenuTextColorArgb { get; set; } = Color.FromArgb(26, 26, 26).ToArgb();
 
-        public int MenuHighlightColorArgb { get; set; } = Color.FromArgb(61, 61, 61).ToArgb();
+        public int MenuHighlightColorArgb { get; set; } = Color.FromArgb(229, 243, 255).ToArgb();
 
-        public int MenuHighlightTextColorArgb { get; set; } = Color.White.ToArgb();
+        public int MenuHighlightTextColorArgb { get; set; } = Color.FromArgb(26, 26, 26).ToArgb();
 
-        public int DialogBackgroundColorArgb { get; set; } = Color.FromArgb(32, 32, 32).ToArgb();
+        public int DialogBackgroundColorArgb { get; set; } = Color.FromArgb(243, 243, 243).ToArgb();
 
-        public int DialogTextColorArgb { get; set; } = Color.FromArgb(245, 245, 245).ToArgb();
+        public int DialogTextColorArgb { get; set; } = Color.FromArgb(26, 26, 26).ToArgb();
 
-        public int ControlBackgroundColorArgb { get; set; } = Color.FromArgb(45, 45, 48).ToArgb();
+        public int ControlBackgroundColorArgb { get; set; } = Color.White.ToArgb();
 
-        public int ControlTextColorArgb { get; set; } = Color.White.ToArgb();
+        public int ControlTextColorArgb { get; set; } = Color.FromArgb(26, 26, 26).ToArgb();
 
-        public int AccentColorArgb { get; set; } = Color.FromArgb(96, 205, 255).ToArgb();
+        public int AccentColorArgb { get; set; } = Color.FromArgb(0, 103, 192).ToArgb();
 
         /// <summary>
         /// Opacity of the body background only. Icons and labels stay fully
@@ -89,11 +100,12 @@ namespace NoFences.Theming
         public bool EnableBlur { get; set; } = true;
 
         /// <summary>
-        /// Controls the best-effort theme of native shell context menus. The
-        /// application-owned ContextMenuStrip is always rendered by our custom
-        /// renderer and therefore supports all custom colors.
+        /// Legacy serialized field retained so settings written by the first
+        /// theming version round-trip safely.  It is intentionally ignored:
+        /// native menus now follow ThemeSettings.DarkModeEnabled, keeping color
+        /// mode independent from the selected visual style.
         /// </summary>
-        public bool PreferDarkNativeMenus { get; set; } = true;
+        public bool PreferDarkNativeMenus { get; set; }
 
         public string BackgroundImagePath { get; set; } = string.Empty;
 
