@@ -19,6 +19,7 @@ namespace NoFences.Win32
         private static readonly object iconCacheLock = new object();
         private static readonly IDictionary<string, Icon> largeIconCache =
             new Dictionary<string, Icon>(StringComparer.OrdinalIgnoreCase);
+        private const float ShortcutOverlayScale = 0.8f;
 
         /// <summary>
         /// 获取系统文件夹大图标（带缓存）。
@@ -181,9 +182,22 @@ namespace NoFences.Win32
                 graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
                 graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                 graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                int overlayWidth = Math.Max(1, (int)Math.Round(
+                    bitmap.Width * ShortcutOverlayScale,
+                    MidpointRounding.AwayFromZero));
+                int overlayHeight = Math.Max(1, (int)Math.Round(
+                    bitmap.Height * ShortcutOverlayScale,
+                    MidpointRounding.AwayFromZero));
+
+                // 缩小覆盖层画布并保持左下角锚定，避免箭头向图标中央漂移
+                var overlayRectangle = new Rectangle(
+                    0,
+                    bitmap.Height - overlayHeight,
+                    overlayWidth,
+                    overlayHeight);
                 graphics.DrawImage(
                     overlayBitmap,
-                    new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                    overlayRectangle);
             }
         }
 
