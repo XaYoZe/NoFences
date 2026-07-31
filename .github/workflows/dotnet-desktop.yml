@@ -89,7 +89,10 @@ jobs:
           "version=$packageVersion" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
 
       # The solution configuration is named Any CPU, while NoFences.csproj
-      # explicitly sets PlatformTarget to x64 for Release builds.
+      # explicitly sets PlatformTarget to x64 for Release builds. Do not set
+      # ContinuousIntegrationBuild for this legacy project: current Roslyn
+      # then enables deterministic source-path mapping and requires SourceRoot
+      # metadata that old-style .NET Framework projects do not generate.
       - name: Build Release
         run: |
           $ErrorActionPreference = "Stop"
@@ -100,7 +103,6 @@ jobs:
             "/t:Rebuild"
             "/p:Configuration=Release"
             "/p:Platform=Any CPU"
-            "/p:ContinuousIntegrationBuild=true"
             "/verbosity:minimal"
           )
           & msbuild @msbuildArguments
