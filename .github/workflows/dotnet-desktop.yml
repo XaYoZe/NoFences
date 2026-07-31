@@ -116,6 +116,95 @@ jobs:
             throw "Expected build output was not found: $executable"
           }
 
+      # This repository has no test project, so keep a small reflection-based
+      # regression check next to the Windows build. It validates the persisted
+      # theme schema and, importantly, that visual style and color mode remain
+      # independent dimensions without launching the desktop application.
+      - name: Validate independent theme modes
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Xml
+
+          $assemblyPath = Join-Path $env:GITHUB_WORKSPACE "NoFences\bin\Release\NoFences.exe"
+          $assembly = [System.Reflection.Assembly]::LoadFrom($assemblyPath)
+
+          $settingsType = $assembly.GetType("NoFences.Theming.ThemeSettings", $true)
+          $settings = [System.Activator]::CreateInstance($settingsType)
+          if ($null -eq $settings.CustomTheme -or $null -eq $settings.CustomDarkTheme) {
+            throw "ThemeSettings must persist separate light and dark custom variants."
+          }
+          if ($settings.DarkModeEnabled) {
+            throw "Dark mode must be an explicit opt-in for new settings."
+          }
+
+          # Verify the new settings fields survive the same XmlSerializer path used
+          # by ThemeManager in production.
+          $serializer = [System.Xml.Serialization.XmlSerializer]::new($settingsType)
+          $stream = [System.IO.MemoryStream]::new()
+          try {
+            $serializer.Serialize($stream, $settings)
+            $stream.Position = 0
+            $roundTrip = $serializer.Deserialize($stream)
+            if ($null -eq $roundTrip.CustomTheme -or $null -eq $roundTrip.CustomDarkTheme) {
+              throw "ThemeSettings XML round-trip lost a custom color-mode variant."
+            }
+          }
+          finally {
+            $stream.Dispose()
+          }
+
+          $modeType = $assembly.GetType("NoFences.Theming.ThemeColorMode", $true)
+          $presetsType = $assembly.GetType("NoFences.Theming.ThemePresets", $true)
+          $createWindows11Methods = @(
+            $presetsType.GetMethods() |
+              Where-Object {
+                $_.Name -eq "CreateWindows11" -and
+                $_.GetParameters().Count -eq 1
+              }
+          )
+          if ($createWindows11Methods.Count -ne 1) {
+            throw "Expected exactly one color-mode-aware Windows 11 factory."
+          }
+          $createWindows11 = $createWindows11Methods[0]
+
+          $lightMode = [System.Enum]::Parse($modeType, "Light")
+          $darkMode = [System.Enum]::Parse($modeType, "Dark")
+          $lightTheme = $createWindows11.Invoke($null, @($lightMode))
+          $darkTheme = $createWindows11.Invoke($null, @($darkMode))
+
+          $expectedLight = [System.Drawing.Color]::FromArgb(243, 243, 243).ToArgb()
+          $expectedDark = [System.Drawing.Color]::FromArgb(32, 32, 32).ToArgb()
+          if ($lightTheme.DialogBackgroundColorArgb -ne $expectedLight) {
+            throw "Windows 11 light mode does not use the expected Fluent light surface."
+          }
+          if ($darkTheme.DialogBackgroundColorArgb -ne $expectedDark) {
+            throw "Windows 11 dark mode does not use the expected Fluent dark surface."
+          }
+          if (
+            $lightTheme.Name -ne $darkTheme.Name -or
+            $lightTheme.FontFamilyName -ne $darkTheme.FontFamilyName -or
+            $lightTheme.CornerRadius -ne $darkTheme.CornerRadius
+          ) {
+            throw "Changing color mode must not change the Windows 11 style identity."
+          }
+
+          $managerType = $assembly.GetType("NoFences.Theming.ThemeManager", $true)
+          if ($null -eq $managerType.GetMethod("SetDarkMode")) {
+            throw "ThemeManager is missing the independent dark-mode API."
+          }
+
+          $dialogType = $assembly.GetType("NoFences.Theming.ThemeConfigurationDialog", $true)
+          $fenceType = $assembly.GetType("NoFences.FenceWindow", $true)
+          $privateInstance = [System.Reflection.BindingFlags]"Instance,NonPublic"
+          if ($null -eq $dialogType.GetField("darkModeCheckBox", $privateInstance)) {
+            throw "Theme configuration dialog is missing its independent dark-mode switch."
+          }
+          if ($null -eq $fenceType.GetField("darkModeToolStripMenuItem", $privateInstance)) {
+            throw "Fence context menu is missing its independent dark-mode switch."
+          }
+
       # Stage one clean directory for both packages. This preserves config and
       # satellite resource files while excluding debug-only PDB files.
       - name: Create installer and portable package
