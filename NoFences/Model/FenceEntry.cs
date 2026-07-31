@@ -3,7 +3,6 @@ using System.Threading.Tasks;
 using System.Diagnostics;
 using System;
 using System.IO;
-using NoFences.Win32;
 using NoFences.Util;
 
 namespace NoFences.Model
@@ -43,22 +42,11 @@ namespace NoFences.Model
 
         /// <summary>
         /// 提取条目的显示图标。
-        /// 文件：优先使用缩略图（图片类），否则使用关联图标。
-        /// 文件夹：使用缓存的系统文件夹大图标。
+        /// 图片文件优先使用缩略图，其他条目通过 Shell 获取带覆盖层的大图标。
         /// </summary>
         public Icon ExtractIcon(ThumbnailProvider thumbnailProvider)
         {
-            if (Type == EntryType.File)
-            {
-                if (thumbnailProvider.IsSupported(Path))
-                    return thumbnailProvider.GenerateThumbnail(Path); // 图片文件生成缩略图
-                else
-                    return Icon.ExtractAssociatedIcon(Path); // 其他文件使用关联图标
-            }
-            else
-            {
-                return IconUtil.FolderLarge; // 文件夹使用缓存的系统大图标
-            }
+            return thumbnailProvider.GenerateIcon(Path);
         }
 
         /// <summary>

@@ -19,10 +19,10 @@ namespace NoFences
         private const float shadowDist = 1.5f;
 
         // 图标与文字布局尺寸（根据桌面图标大小动态计算）
-        private int iconSize;        // 图标边长（正方形）
-        private int itemWidth;       // 每个栅栏项的宽度（含间距）
-        private int textHeight;      // 文字区域高度
-        private int itemPadding;     // 图标与文字之间的间距
+        private int iconSize;        // 图标边长（设备像素，直接用于 GDI+ 绘制）
+        private int itemWidth;       // 每个栅栏项的宽度（设备像素，含间距）
+        private int textHeight;      // 文字区域高度（设备像素）
+        private int itemPadding;     // 图标与文字之间的间距（设备像素）
         private int itemHeight;      // 单个栅栏项的总高度 = iconSize + itemPadding + textHeight
         private ICONMETRICS iconMetrics; // 系统桌面图标度量（含字体、间距等）
 
@@ -45,7 +45,8 @@ namespace NoFences
 
         // 定时轮询桌面图标大小变化（Ctrl+滚轮缩放不会触发 WM_SETTINGCHANGE）
         private readonly Timer iconMetricsPollTimer;
-        private int lastDesktopIconSize; // 上一次检测到的桌面图标逻辑间距，用于判断是否需要刷新
+        private int lastDesktopIconSpacing; // 上一次检测到的桌面图标设备像素间距
+        private int lastDesktopIconSize;    // 上一次检测到的桌面图标逻辑像素边长
 
         private readonly ThrottledExecution throttledMove = new ThrottledExecution(TimeSpan.FromSeconds(4));
         private readonly ThrottledExecution throttledResize = new ThrottledExecution(TimeSpan.FromSeconds(4));
@@ -68,6 +69,18 @@ namespace NoFences
         }
 
         /// <summary>
+        /// 将逻辑像素（96 DPI 坐标）转换为当前窗口的设备像素。
+        /// 使用原生 GetDpiForWindow，避免 WinForms 缓存的 DPI 值滞后。
+        /// </summary>
+        private int LogicalPixelsToDevice(int logicalPixels)
+        {
+            uint dpi = 96;
+            if (IsHandleCreated)
+                dpi = GetDpiForWindow(Handle);
+            return (int)Math.Round(logicalPixels * dpi / 96.0, MidpointRounding.AwayFromZero);
+        }
+
+        /// <summary>
         /// 加载系统图标度量并计算栅栏项布局尺寸。
         /// 优先从桌面 SysListView32 读取实际图标间距（支持 Ctrl+滚轮缩放），
         /// 回退到系统 SPI_GETICONMETRICS 的默认值。
@@ -78,37 +91,46 @@ namespace NoFences
             {
                 // 1. 通过 LVM_GETITEMSPACING 读取桌面 SysListView32 的实际图标间距（设备像素）
                 int deviceSpacing = GetDesktopIconSpacing();
+                // 2. 通过 Shell 当前文件夹视图读取实际图标边长（逻辑像素）
+                int logicalDesktopIconSize = DesktopUtil.GetDesktopIconSize();
 
-                // 2. 通过 SPI_GETICONMETRICS 读取系统图标度量（获取字体信息）
+                lastDesktopIconSpacing = deviceSpacing > 0 ? deviceSpacing : -1;
+                lastDesktopIconSize = logicalDesktopIconSize > 0 ? logicalDesktopIconSize : -1;
+
+                // 3. 通过 SPI_GETICONMETRICS 读取系统图标度量（获取字体信息）
                 iconMetrics = new ICONMETRICS();
                 iconMetrics.cbSize = (uint)Marshal.SizeOf(typeof(ICONMETRICS));
                 SystemParametersInfo(SPI_GETICONMETRICS, iconMetrics.cbSize, ref iconMetrics, 0);
 
-                // 3. 将设备像素间距转换为逻辑像素（96 DPI），供 WinForms 自动缩放使用
-                int logicalSpacing;
+                // 4. GDI+ 手工绘制直接使用设备像素；仅对 SPI 的逻辑值做一次 DPI 放大
+                int deviceItemWidth;
                 if (deviceSpacing > 0)
-                    logicalSpacing = DevicePixelsToLogical(deviceSpacing);
+                    deviceItemWidth = deviceSpacing;
                 else if (iconMetrics.iHorzSpacing > 0)
-                    logicalSpacing = iconMetrics.iHorzSpacing; // SPI_GETICONMETRICS 返回的已是 96 DPI 逻辑值
+                    deviceItemWidth = LogicalPixelsToDevice(iconMetrics.iHorzSpacing);
                 else
-                    logicalSpacing = 75; // 兜底默认值
+                    deviceItemWidth = LogicalPixelsToDevice(75);
 
-                // 4. 根据间距比例计算单元格宽度
-                itemWidth = Math.Max(60, logicalSpacing);          // 项宽度不小于 60px
-                // 5. 读取桌面真实图标尺寸（设备像素）
-                int deviceIconSize = GetDesktopIconSize();
-                int logicalIconSize;
-                if (deviceIconSize > 0)
-                    logicalIconSize = DevicePixelsToLogical(deviceIconSize);
+                // 5. 根据桌面实际间距计算单元格宽度
+                itemWidth = Math.Max(LogicalPixelsToDevice(60), deviceItemWidth);
+                // 6. 应用桌面当前视图的真实图标尺寸
+                int renderedIconSize;
+                if (logicalDesktopIconSize > 0)
+                    renderedIconSize = LogicalPixelsToDevice(logicalDesktopIconSize);
                 else
-                    logicalIconSize = Math.Max(16, (int)(itemWidth * 0.43)); // 回退到估算值
+                    renderedIconSize = LogicalPixelsToDevice(
+                        Math.Max(16, (int)(DevicePixelsToLogical(itemWidth) * 0.43))); // 回退到估算值
 
-                iconSize = Math.Max(16, logicalIconSize); // 图标边长
-                itemPadding = Math.Max(8, (int)(itemWidth * 0.20)); // 内边距约占 20%，保证图标上边距可见
+                // Shell 返回 DIP，GDI+ 绘制矩形使用设备像素，因此在此统一乘以 DPI 比例
+                iconSize = Math.Max(LogicalPixelsToDevice(16), renderedIconSize);
+                // 图标放大时单元格至少与图标同宽，避免相邻图标重叠
+                itemWidth = Math.Max(itemWidth, iconSize);
+                itemPadding = Math.Max(LogicalPixelsToDevice(8), (int)(itemWidth * 0.20));
                 // 文字区域高度：按桌面图标字体行高 × 行数（iTitleWrap 启用时 2 行，否则 1 行）
                 using (var tmpFont = CreateIconFontFromLogFont())
+                using (var graphics = CreateGraphics())
                 {
-                    int lineHeight = (int)Math.Ceiling(tmpFont.GetHeight());
+                    int lineHeight = (int)Math.Ceiling(tmpFont.GetHeight(graphics));
                     textHeight = Math.Max(lineHeight, lineHeight * 2 + 4); // 按 Windows 桌面规则始终 2 行
                 }
                 itemHeight = iconSize + itemPadding / 3 + textHeight;  // 项总高度（与实际渲染中 icon-text 间距一致）
@@ -116,10 +138,10 @@ namespace NoFences
             catch
             {
                 // 读取失败时使用合理的硬编码默认值
-                itemWidth = 75;
-                iconSize = 32;
-                textHeight = 35;
-                itemPadding = 15;
+                itemWidth = LogicalPixelsToDevice(75);
+                iconSize = LogicalPixelsToDevice(32);
+                textHeight = LogicalPixelsToDevice(35);
+                itemPadding = LogicalPixelsToDevice(15);
                 itemHeight = iconSize + itemPadding / 3 + textHeight;
             }
         }
@@ -167,31 +189,6 @@ namespace NoFences
         }
 
         /// <summary>
-        /// 读取桌面 SysListView32 的真实图标大小（通过 ImageList_GetIconSize）。
-        /// 返回设备像素下的图标宽度，失败时返回 -1。
-        /// </summary>
-        private static int GetDesktopIconSize()
-        {
-            IntPtr hwndListView = FindDesktopListView();
-            if (hwndListView == IntPtr.Zero)
-                return -1;
-
-            // LVM_GETIMAGELIST (0x1002)：wParam=LVSIL_NORMAL(0) 获取大图标 ImageList
-            IntPtr himl = SendMessage(hwndListView, 0x1002, (IntPtr)0, IntPtr.Zero);
-            if (himl == IntPtr.Zero)
-                return -1;
-
-            int cx = 0, cy = 0;
-            if (!ImageList_GetIconSize(himl, out cx, out cy))
-                return -1;
-
-            return Math.Max(cx, cy);
-        }
-
-        [DllImport("comctl32.dll", SetLastError = true)]
-        private static extern bool ImageList_GetIconSize(IntPtr himl, out int cx, out int cy);
-
-        /// <summary>
         /// 直接读取桌面 SysListView32 的实际图标间距（通过 LVM_GETITEMSPACING 消息）。
         /// 这能反映 Ctrl+滚轮 缩放桌面图标后的实时大小，
         /// 而 SPI_GETICONMETRICS 返回的是系统默认值，不会随 Ctrl+滚轮变化。
@@ -222,17 +219,13 @@ namespace NoFences
         {
             var prevIconSize = iconSize;
             LoadAndApplyMetrics();
-            // 更新上次检测值，供定时轮询对比使用
-            int curDeviceSpacing = GetDesktopIconSpacing();
-            int curLogicalSpacing = curDeviceSpacing > 0 ? DevicePixelsToLogical(curDeviceSpacing) : -1;
-            lastDesktopIconSize = curLogicalSpacing;
-            if (iconSize != prevIconSize)
-            {
-                // 图标大小变化时：更新缩略图尺寸、重建字体、触发重绘
-                thumbnailProvider.TargetSize = LogicalToDeviceUnits(iconSize);
-                ReloadFonts();
-                Invalidate();
-            }
+
+            if (thumbnailProvider != null && iconSize != prevIconSize)
+                thumbnailProvider.TargetSize = iconSize;
+
+            // 系统设置消息也可能只改变字体，因此每次应用度量都重建字体并重绘
+            ReloadFonts();
+            Invalidate();
         }
 
         /// <summary>
@@ -294,19 +287,21 @@ namespace NoFences
 
             // 必须在 Handle 创建后计算图标度量（需要正确的 DPI 信息）
             LoadAndApplyMetrics();
-            int curDeviceSpacing = GetDesktopIconSpacing();
-            lastDesktopIconSize = curDeviceSpacing > 0 ? DevicePixelsToLogical(curDeviceSpacing) : -1;
 
-            // 创建缩略图生成器（使用设备像素尺寸）
-            thumbnailProvider = new ThumbnailProvider(LogicalToDeviceUnits(iconSize));
+            // 创建缩略图生成器（iconSize 已是设备像素尺寸）
+            thumbnailProvider = new ThumbnailProvider(iconSize);
 
-            // 每 1.5 秒轮询桌面图标间距变化（捕获 Ctrl+滚轮 缩放）
+            // 每 1.5 秒同时轮询桌面图标间距与边长（捕获 Ctrl+滚轮缩放）
             iconMetricsPollTimer = new Timer { Interval = 1500 };
             iconMetricsPollTimer.Tick += (s, e) =>
             {
                 int curSpacing = GetDesktopIconSpacing();
-                int curLogical = curSpacing > 0 ? DevicePixelsToLogical(curSpacing) : -1;
-                if (curLogical > 0 && curLogical != lastDesktopIconSize)
+                int curIconSize = DesktopUtil.GetDesktopIconSize();
+                bool spacingChanged = curSpacing > 0 &&
+                    curSpacing != lastDesktopIconSpacing;
+                bool iconSizeChanged = curIconSize > 0 &&
+                    curIconSize != lastDesktopIconSize;
+                if (spacingChanged || iconSizeChanged)
                 {
                     ApplyIconMetrics();
                 }
@@ -591,6 +586,9 @@ namespace NoFences
             e.Graphics.Clip = new Region(ClientRectangle);
             e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            e.Graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
 
             // 背景：半透明黑色
             e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(100, Color.Black)), ClientRectangle);
@@ -677,7 +675,7 @@ namespace NoFences
                 if (expandIcon != null)
                 {
                     var expandIconRect = new Rectangle(expandEntryX + itemWidth / 2 - iconSize / 2, expandEntryY, iconSize, iconSize);
-                    e.Graphics.DrawIcon(expandIcon, expandIconRect);
+                    DrawIconHighQuality(e.Graphics, expandIcon, expandIconRect);
                 }
 
                 // 绘制文字阴影
@@ -704,15 +702,24 @@ namespace NoFences
 
             // 计算内容溢出高度（用于滚动条），确保不会出现负值
             scrollHeight = Math.Max(0, scrollHeight - (ClientRectangle.Height - titleHeight));
+            scrollOffset = Math.Min(scrollOffset, scrollHeight);
 
             // 滚动条：仅在内容溢出时绘制
             if (scrollHeight > 0)
             {
-                var contentHeight = Height - titleHeight;
-                var scrollbarHeight = contentHeight - scrollHeight;
-                e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(150, Color.Black)), new Rectangle(Width - 5, titleHeight + scrollOffset, 5, scrollbarHeight));
-
-                scrollOffset = Math.Min(scrollOffset, scrollHeight);
+                int contentHeight = Math.Max(1, Height - titleHeight);
+                int totalContentHeight = contentHeight + scrollHeight;
+                int proportionalHeight = (int)Math.Round(
+                    contentHeight * (contentHeight / (double)totalContentHeight));
+                int scrollbarHeight = Math.Min(
+                    contentHeight,
+                    Math.Max(LogicalPixelsToDevice(20), proportionalHeight));
+                int scrollbarTravel = contentHeight - scrollbarHeight;
+                int scrollbarY = titleHeight + (int)Math.Round(
+                    scrollOffset / (double)scrollHeight * scrollbarTravel);
+                e.Graphics.FillRectangle(
+                    new SolidBrush(Color.FromArgb(150, Color.Black)),
+                    new Rectangle(Width - 5, scrollbarY, 5, scrollbarHeight));
             }
 
 
@@ -810,7 +817,7 @@ namespace NoFences
 
             // 绘制图标（居中缩放至 iconSize × iconSize）
             var iconRect = new Rectangle(x + itemWidth / 2 - iconSize / 2, y, iconSize, iconSize);
-            g.DrawIcon(icon, iconRect);
+            DrawIconHighQuality(g, icon, iconRect);
 
             // 选中条目跳过文字绘制（将在循环后单独渲染到最顶层以保证 z-order 正确）
             if (skipText)
@@ -819,6 +826,21 @@ namespace NoFences
             // 绘制文字（先画阴影偏移，再画白色前景）
             g.DrawString(name, iconFont, new SolidBrush(Color.FromArgb(180, 15, 15, 15)), new RectangleF(textPosition.Move(shadowDist, shadowDist), textMaxSize), stringFormat);
             g.DrawString(name, iconFont, Brushes.White, new RectangleF(textPosition, textMaxSize), stringFormat);
+        }
+
+        /// <summary>
+        /// 使用带 Alpha 通道的位图和高质量双三次插值绘制图标，
+        /// 避免 DrawIcon 放大低分辨率图标时产生明显锯齿。
+        /// </summary>
+        private static void DrawIconHighQuality(Graphics graphics, Icon icon, Rectangle targetRectangle)
+        {
+            if (icon == null)
+                return;
+
+            using (var bitmap = icon.ToBitmap())
+            {
+                graphics.DrawImage(bitmap, targetRectangle);
+            }
         }
 
         /// <summary>重命名栅栏。</summary>
@@ -928,7 +950,7 @@ namespace NoFences
             if (scrollHeight < 1)
                 return;
 
-            scrollOffset -= Math.Sign(e.Delta) * 10; // 每次滚动 10 像素
+            scrollOffset -= Math.Sign(e.Delta) * LogicalPixelsToDevice(10);
             if (scrollOffset < 0)
                 scrollOffset = 0;
             if (scrollOffset > scrollHeight)
@@ -940,6 +962,22 @@ namespace NoFences
         /// <summary>缩略图异步加载完成 → 触发重绘。</summary>
         private void ThumbnailProvider_IconThumbnailLoaded(object sender, EventArgs e)
         {
+            if (IsDisposed || Disposing || !IsHandleCreated)
+                return;
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(Invalidate));
+                }
+                catch (InvalidOperationException)
+                {
+                    // 窗口可能在后台提取完成前已关闭
+                }
+                return;
+            }
+
             Invalidate();
         }
 
