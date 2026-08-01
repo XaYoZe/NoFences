@@ -30,6 +30,17 @@ namespace NoFences.Theming
     }
 
     /// <summary>
+    /// 应用自有右键菜单的结构风格。颜色仍由 <see cref="ThemeDefinition"/>
+    /// 提供，此枚举只决定尺寸、留白、边框、箭头和选中区域等几何语义。
+    /// </summary>
+    public enum ThemeMenuStyle
+    {
+        Standard,
+        Windows11,
+        WindowsXp
+    }
+
+    /// <summary>
     /// Contains every visual value consumed by the application.
     ///
     /// Colors are stored as ARGB integers because <see cref="XmlSerializer"/>
@@ -80,6 +91,12 @@ namespace NoFences.Theming
         public int ControlTextColorArgb { get; set; } = Color.FromArgb(26, 26, 26).ToArgb();
 
         public int AccentColorArgb { get; set; } = Color.FromArgb(0, 103, 192).ToArgb();
+
+        /// <summary>
+        /// 右键菜单的结构风格。作为主题定义的一部分持久化，使“基于此主题
+        /// 自定义”能够同时复制对应的菜单密度和交互视觉。
+        /// </summary>
+        public ThemeMenuStyle MenuStyle { get; set; } = ThemeMenuStyle.Standard;
 
         /// <summary>
         /// Opacity of the body background only. Icons and labels stay fully
@@ -196,6 +213,8 @@ namespace NoFences.Theming
 
             if (!Enum.IsDefined(typeof(ThemeImageLayout), BackgroundImageLayout))
                 BackgroundImageLayout = ThemeImageLayout.Fill;
+            if (!Enum.IsDefined(typeof(ThemeMenuStyle), MenuStyle))
+                MenuStyle = ThemeMenuStyle.Standard;
         }
 
         private static int Clamp(int value, int minimum, int maximum)

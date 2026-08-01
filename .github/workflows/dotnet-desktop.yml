@@ -28,6 +28,8 @@ jobs:
     name: Build x64 installer
     runs-on: windows-2022
     timeout-minutes: 20
+    outputs:
+      package-version: ${{ steps.version.outputs.version }}
 
     defaults:
       run:
@@ -382,3 +384,34 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  # Keep release publishing in a separate least-privilege job. Normal branch and
+  # pull-request builds retain read-only repository access; only a verified v* tag
+  # receives the contents:write token needed to create the GitHub Release.
+  release:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified Windows packages
+        uses: actions/download-artifact@v7
+        with:
+          name: NoFences-${{ needs.package.outputs.package-version }}-win-x64
+          path: artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            artifacts/*.exe \
+            artifacts/*.zip \
+            artifacts/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "NoFences $GITHUB_REF_NAME" \
+            --generate-notes

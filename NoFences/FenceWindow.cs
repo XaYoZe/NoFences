@@ -4,6 +4,7 @@ using NoFences.Util;
 using NoFences.Win32;
 using Peter;
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -59,6 +60,7 @@ namespace NoFences
         // 主题对象始终保存为独立快照，确保一次绘制使用一致的颜色和尺寸。
         private ThemeDefinition currentTheme;
         private Image backgroundImage;
+        private readonly List<Image> themedMenuImages = new List<Image>();
 
         /// <summary>
         /// 将设备像素（物理像素）转换为逻辑像素（96 DPI 坐标）。
@@ -367,10 +369,11 @@ namespace NoFences
         /// </summary>
         private void ApplyTheme(ThemeDefinition theme)
         {
-            currentTheme = (theme ?? ThemePresets.CreateWindows11()).Clone();
+            currentTheme = (theme ?? ThemePresets.CreateDefault()).Clone();
             currentTheme.Normalize();
 
             BackColor = currentTheme.MainPanelColor;
+            ApplyContextMenuIcons();
             ThemeUi.ApplyToContextMenu(appContextMenu, currentTheme);
             darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
             BlurUtil.SetBlur(Handle, currentTheme.EnableBlur);
@@ -378,6 +381,51 @@ namespace NoFences
             ReloadFonts();
             UpdateRoundedRegion();
             Invalidate(true);
+        }
+
+        /// <summary>
+        /// 根据当前菜单风格重新生成应用菜单图标。Win11 使用单色 Fluent 线条，
+        /// XP 使用彩色高对比图标；主题切换前释放旧位图，避免长期运行泄漏 GDI。
+        /// </summary>
+        private void ApplyContextMenuIcons()
+        {
+            ClearContextMenuIcons();
+            SetContextMenuIcon(deleteItemToolStripMenuItem, ThemedMenuIcon.Delete);
+            SetContextMenuIcon(renameToolStripMenuItem, ThemedMenuIcon.Rename);
+            SetContextMenuIcon(titleSizeToolStripMenuItem, ThemedMenuIcon.TitleHeight);
+            SetContextMenuIcon(themeToolStripMenuItem, ThemedMenuIcon.Theme);
+            SetContextMenuIcon(newFenceToolStripMenuItem, ThemedMenuIcon.NewFence);
+            SetContextMenuIcon(exitToolStripMenuItem, ThemedMenuIcon.CloseFence);
+            SetContextMenuIcon(quitApplicationToolStripMenuItem, ThemedMenuIcon.QuitApplication);
+        }
+
+        private void SetContextMenuIcon(
+            ToolStripMenuItem item,
+            ThemedMenuIcon icon)
+        {
+            Image image = ThemedMenuIconFactory.Create(icon, currentTheme);
+            themedMenuImages.Add(image);
+            item.ImageScaling = ToolStripItemImageScaling.None;
+            item.Image = image;
+        }
+
+        /// <summary>解除菜单项引用并释放本窗口生成的所有主题图标。</summary>
+        private void ClearContextMenuIcons()
+        {
+            deleteItemToolStripMenuItem.Image = null;
+            lockedToolStripMenuItem.Image = null;
+            minifyToolStripMenuItem.Image = null;
+            renameToolStripMenuItem.Image = null;
+            titleSizeToolStripMenuItem.Image = null;
+            themeToolStripMenuItem.Image = null;
+            darkModeToolStripMenuItem.Image = null;
+            newFenceToolStripMenuItem.Image = null;
+            exitToolStripMenuItem.Image = null;
+            quitApplicationToolStripMenuItem.Image = null;
+
+            foreach (Image image in themedMenuImages)
+                image.Dispose();
+            themedMenuImages.Clear();
         }
 
         private void ThemeManager_ThemeChanged(object sender, EventArgs e)
@@ -572,11 +620,17 @@ namespace NoFences
             Refresh();
         }
 
-        /// <summary>右键菜单打开前：仅在有悬停条目时显示"删除"选项。</summary>
+        /// <summary>
+        /// 在应用自有右键菜单打开前更新动态菜单项，并在最终布局完成后重新应用
+        /// 当前主题。该菜单由空白处右键或条目上的 Shift+右键触发。
+        /// </summary>
         private void contextMenuStrip1_Opening(object sender, System.ComponentModel.CancelEventArgs e)
         {
             deleteItemToolStripMenuItem.Visible = hoveringItem != null;
             darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
+            // 可见性和勾选状态会触发 ToolStrip 重新布局；在这些状态更新后应用
+            // 主题，确保空白处右键弹出的整个菜单窗口都按当前主题重新绘制。
+            ThemeUi.ApplyToContextMenu(appContextMenu, currentTheme);
         }
 
         /// <summary>拖放进入：仅接受文件拖放（锁定状态下拒绝）。</summary>
@@ -690,7 +744,7 @@ namespace NoFences
         /// </summary>
         private void FenceWindow_Paint(object sender, PaintEventArgs e)
         {
-            var theme = currentTheme ?? ThemePresets.CreateWindows11();
+            var theme = currentTheme ?? ThemePresets.CreateDefault();
             e.Graphics.SetClip(ClientRectangle);
             e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
@@ -928,7 +982,7 @@ namespace NoFences
         /// </summary>
         private void RenderEntry(Graphics g, FenceEntry entry, int x, int y, bool skipText = false)
         {
-            var theme = currentTheme ?? ThemePresets.CreateWindows11();
+            var theme = currentTheme ?? ThemePresets.CreateDefault();
             var icon = entry.ExtractIcon(thumbnailProvider);
             var name = entry.Name;
 
@@ -1099,6 +1153,7 @@ namespace NoFences
 
             backgroundImage?.Dispose();
             backgroundImage = null;
+            ClearContextMenuIcons();
             titleFont?.Dispose();
             titleFont = null;
             iconFont?.Dispose();

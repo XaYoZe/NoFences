@@ -83,6 +83,8 @@
     <Compile Include="Theming\ThemeDefinition.cs" />
     <Compile Include="Theming\ThemeDrawing.cs" />
     <Compile Include="Theming\ThemeManager.cs" />
+    <Compile Include="Theming\MenuThemeProfile.cs" />
+    <Compile Include="Theming\ThemedMenuIconFactory.cs" />
     <Compile Include="Theming\ThemeProviders.cs" />
     <Compile Include="Theming\ThemedToolStripRenderer.cs" />
     <Compile Include="Theming\ThemeText.cs" />

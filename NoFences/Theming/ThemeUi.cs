@@ -7,14 +7,13 @@ using System.Windows.Forms;
 namespace NoFences.Theming
 {
     /// <summary>
-    /// Applies dialog and menu colors recursively. Forms opt into this service
-    /// instead of duplicating theme-specific conditionals in individual screens.
+    /// 递归应用设置窗口与菜单主题。窗口只依赖本服务，不需要分别判断
+    /// Default、Windows 11 或 Windows XP，从而避免各页面出现不同步的主题逻辑。
     /// </summary>
     public static class ThemeUi
     {
-        // Fonts are shared for the lifetime of this small desktop application.
-        // WinForms controls do not consistently own/dispose assigned Font objects,
-        // so a cache avoids leaking a new HFONT on every live-preview update.
+        // 字体在这个轻量桌面程序的整个生命周期内共享。WinForms 控件对外部
+        // Font 的所有权不一致，缓存可以避免实时预览每次刷新都泄漏一个 HFONT。
         private static readonly object fontCacheLock = new object();
         private static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
 
@@ -48,12 +47,10 @@ namespace NoFences.Theming
             if (menu == null || theme == null)
                 return;
 
-            menu.RenderMode = ToolStripRenderMode.ManagerRenderMode;
-            menu.Renderer = new ThemedToolStripRenderer(theme);
-            menu.BackColor = theme.MenuBackgroundColor;
-            menu.ForeColor = theme.MenuTextColor;
-            menu.Font = GetThemeFont(theme.FontFamilyName, menu.Font.Size, menu.Font.Style);
-            ApplyToToolStripItems(menu.Items, theme);
+            // Renderer 属性会把 RenderMode 切换为 Custom。不能在这里使用
+            // ManagerRenderMode，否则菜单可能重新落回全局 ProfessionalRenderer，
+            // 从而在主题切换后仍显示 Windows/设计器的默认颜色。
+            ApplyToToolStrip(menu, theme, new ThemedToolStripRenderer(theme));
         }
 
         private static void ApplyToChildren(Control.ControlCollection controls, ThemeDefinition theme)
@@ -121,11 +118,10 @@ namespace NoFences.Theming
             }
             else if (control is ToolStrip)
             {
-                var strip = (ToolStrip)control;
-                strip.Renderer = new ThemedToolStripRenderer(theme);
-                strip.BackColor = theme.MenuBackgroundColor;
-                strip.ForeColor = theme.MenuTextColor;
-                ApplyToToolStripItems(strip.Items, theme);
+                ApplyToToolStrip(
+                    (ToolStrip)control,
+                    theme,
+                    new ThemedToolStripRenderer(theme));
             }
             else
             {
@@ -133,24 +129,179 @@ namespace NoFences.Theming
             }
         }
 
-        private static void ApplyToToolStripItems(ToolStripItemCollection items, ThemeDefinition theme)
+        /// <summary>
+        /// 将同一个主题渲染器应用到工具栏及其所有下拉层级。
+        /// ToolStripMenuItem.DropDown 本身是一个独立 ToolStrip；只修改顶层菜单
+        /// 不会可靠地覆盖子菜单的背景、边框和悬停状态，因此必须递归处理。
+        /// </summary>
+        private static void ApplyToToolStrip(
+            ToolStrip strip,
+            ThemeDefinition theme,
+            ThemedToolStripRenderer renderer)
         {
+            MenuThemeProfile profile = renderer.Profile;
+            bool isDropDown = strip is ToolStripDropDown;
+            Padding menuPadding = ScalePadding(strip, profile.MenuPadding);
+            Padding itemPadding = ScalePadding(strip, profile.ItemPadding);
+            int minimumWidth = ScaleLogical(strip, profile.MinimumWidth);
+            int itemHeight = ScaleLogical(strip, profile.ItemHeight);
+            int separatorHeight = ScaleLogical(strip, profile.SeparatorHeight);
+
+            strip.SuspendLayout();
+            try
+            {
+                strip.Renderer = renderer;
+                strip.BackColor = theme.MenuBackgroundColor;
+                strip.ForeColor = theme.MenuTextColor;
+                strip.Font = GetThemeFont(
+                    profile.FontFamilyName,
+                    profile.FontSize,
+                    FontStyle.Regular,
+                    theme.FontFamilyName);
+                strip.ImageScalingSize = new Size(
+                    ScaleLogical(strip, profile.ImageScalingSize.Width),
+                    ScaleLogical(strip, profile.ImageScalingSize.Height));
+                strip.GripStyle = ToolStripGripStyle.Hidden;
+
+                if (isDropDown)
+                {
+                    strip.AutoSize = true;
+                    strip.MinimumSize = new Size(minimumWidth, 0);
+                    strip.Padding = menuPadding;
+
+                    var dropDown = (ToolStripDropDown)strip;
+                    dropDown.DropShadowEnabled = profile.DropShadowEnabled;
+                    dropDown.Opacity = profile.Opacity;
+
+                    var dropDownMenu = strip as ToolStripDropDownMenu;
+                    if (dropDownMenu != null)
+                    {
+                        dropDownMenu.ShowImageMargin = true;
+                        dropDownMenu.ShowCheckMargin = false;
+                    }
+                }
+
+                ApplyToToolStripItems(
+                    strip,
+                    strip.Items,
+                    theme,
+                    renderer,
+                    isDropDown,
+                    itemPadding,
+                    minimumWidth,
+                    itemHeight,
+                    separatorHeight);
+            }
+            finally
+            {
+                strip.ResumeLayout(true);
+            }
+
+            strip.PerformLayout();
+            strip.Invalidate();
+        }
+
+        /// <summary>
+        /// 同步菜单项本身的字体和前景色，并把主题继续传递给已创建的子菜单。
+        /// </summary>
+        private static void ApplyToToolStripItems(
+            ToolStrip owner,
+            ToolStripItemCollection items,
+            ThemeDefinition theme,
+            ThemedToolStripRenderer renderer,
+            bool applyDropDownMetrics,
+            Padding itemPadding,
+            int minimumWidth,
+            int itemHeight,
+            int separatorHeight)
+        {
+            MenuThemeProfile profile = renderer.Profile;
             foreach (ToolStripItem item in items)
             {
                 item.BackColor = theme.MenuBackgroundColor;
                 item.ForeColor = theme.MenuTextColor;
-                item.Font = GetThemeFont(theme.FontFamilyName, item.Font.Size, item.Font.Style);
+                item.Font = GetThemeFont(
+                    profile.FontFamilyName,
+                    profile.FontSize,
+                    item.Font.Style,
+                    theme.FontFamilyName);
+
+                if (applyDropDownMetrics)
+                {
+                    item.Margin = Padding.Empty;
+                    if (item is ToolStripSeparator)
+                    {
+                        item.AutoSize = false;
+                        item.Padding = Padding.Empty;
+                        item.Size = new Size(
+                            Math.Max(1, minimumWidth - owner.Padding.Horizontal),
+                            separatorHeight);
+                    }
+                    else
+                    {
+                        // 先恢复 AutoSize 取得当前文字、快捷键和箭头的自然宽度，
+                        // 再固定规格要求的行高；切换 Win11/XP 时不会继承旧尺寸。
+                        item.AutoSize = true;
+                        item.Padding = itemPadding;
+                        Size preferred = item.GetPreferredSize(Size.Empty);
+                        item.AutoSize = false;
+                        item.Size = new Size(
+                            Math.Max(
+                                preferred.Width,
+                                minimumWidth - owner.Padding.Horizontal),
+                            itemHeight);
+                    }
+                }
+
                 var menuItem = item as ToolStripMenuItem;
                 if (menuItem != null && menuItem.HasDropDownItems)
-                    ApplyToToolStripItems(menuItem.DropDownItems, theme);
+                    ApplyToToolStrip(menuItem.DropDown, theme, renderer);
             }
         }
 
-        private static Font GetThemeFont(string familyName, float size, FontStyle style)
+        /// <summary>
+        /// 把 Profile 中的 96-DPI 逻辑像素换算为当前菜单的设备像素。
+        /// 在 Opening 阶段再次应用主题时，ContextMenuStrip 已取得所属显示器 DPI，
+        /// 因而拖到不同缩放比例的显示器后仍可保持 22px/34px 的逻辑行高。
+        /// </summary>
+        private static int ScaleLogical(ToolStrip strip, int logicalPixels)
+        {
+            int dpi = strip.DeviceDpi > 0 ? strip.DeviceDpi : 96;
+            return Math.Max(1, (int)Math.Round(
+                logicalPixels * dpi / 96d,
+                MidpointRounding.AwayFromZero));
+        }
+
+        private static Padding ScalePadding(ToolStrip strip, Padding logicalPadding)
+        {
+            return new Padding(
+                ScaleLogicalAllowZero(strip, logicalPadding.Left),
+                ScaleLogicalAllowZero(strip, logicalPadding.Top),
+                ScaleLogicalAllowZero(strip, logicalPadding.Right),
+                ScaleLogicalAllowZero(strip, logicalPadding.Bottom));
+        }
+
+        private static int ScaleLogicalAllowZero(ToolStrip strip, int logicalPixels)
+        {
+            if (logicalPixels == 0)
+                return 0;
+            int dpi = strip.DeviceDpi > 0 ? strip.DeviceDpi : 96;
+            return Math.Max(1, (int)Math.Round(
+                logicalPixels * dpi / 96d,
+                MidpointRounding.AwayFromZero));
+        }
+
+        private static Font GetThemeFont(
+            string familyName,
+            float size,
+            FontStyle style,
+            string fallbackFamilyName = null)
         {
             if (string.IsNullOrWhiteSpace(familyName))
                 familyName = "Segoe UI";
-            string key = familyName + "|" + size + "|" + (int)style;
+            if (string.IsNullOrWhiteSpace(fallbackFamilyName))
+                fallbackFamilyName = "Segoe UI";
+            string key = familyName + "|" + fallbackFamilyName + "|" + size + "|" + (int)style;
             lock (fontCacheLock)
             {
                 if (fontCache.TryGetValue(key, out var cached))
@@ -158,10 +309,29 @@ namespace NoFences.Theming
                 try
                 {
                     cached = new Font(familyName, size, style);
+
+                    // GDI+ 对不存在的字体通常静默回退而不是抛异常。显式检查
+                    // 实际 FontFamily，保证没有 Segoe UI Variable 的系统回退到
+                    // 当前主题字体，而不是不可预测的 Microsoft Sans Serif。
+                    if (!string.Equals(
+                        cached.FontFamily.Name,
+                        familyName,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        cached.Dispose();
+                        cached = new Font(fallbackFamilyName, size, style);
+                    }
                 }
                 catch
                 {
-                    cached = new Font("Segoe UI", size, style);
+                    try
+                    {
+                        cached = new Font(fallbackFamilyName, size, style);
+                    }
+                    catch
+                    {
+                        cached = new Font("Segoe UI", size, style);
+                    }
                 }
                 fontCache[key] = cached;
                 return cached;

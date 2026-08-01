@@ -15,7 +15,15 @@ namespace NoFences.Theming
     [Serializable]
     public sealed class ThemeSettings
     {
-        public string SelectedThemeId { get; set; } = ThemeIds.Windows11;
+        public const int CurrentSchemaVersion = 2;
+
+        /// <summary>
+        /// 主题配置结构版本。版本 2 首次加入独立的“默认”主题，用于区分旧版
+        /// 隐式 Windows 11 默认值与用户在新版中主动选择的 Windows 11。
+        /// </summary>
+        public int ThemeSchemaVersion { get; set; } = CurrentSchemaVersion;
+
+        public string SelectedThemeId { get; set; } = ThemeIds.Default;
 
         /// <summary>
         /// Independent application color-mode switch.  It must never be inferred
@@ -55,6 +63,13 @@ namespace NoFences.Theming
 
         private ThemeManager()
         {
+            // 注册顺序就是配置面板中的显示顺序。“默认”必须排在第一项，
+            // 同时也是新安装、损坏配置和未知主题标识的统一回退主题。
+            RegisterThemeInternal(new StaticThemeProvider(
+                ThemeIds.Default,
+                ThemeText.DefaultTheme,
+                ThemePresets.CreateDefault(ThemeColorMode.Light),
+                ThemePresets.CreateDefault(ThemeColorMode.Dark)));
             RegisterThemeInternal(new StaticThemeProvider(
                 ThemeIds.Windows11,
                 "Windows 11",
@@ -221,7 +236,7 @@ namespace NoFences.Theming
             lock (syncRoot)
             {
                 if (!IsKnownThemeInternal(themeId))
-                    themeId = ThemeIds.Windows11;
+                    themeId = ThemeIds.Default;
 
                 if (customLightTheme != null)
                     settings.CustomTheme = PrepareCustomTheme(customLightTheme);
@@ -309,7 +324,7 @@ namespace NoFences.Theming
             }
             else
             {
-                result = ThemePresets.CreateWindows11(colorMode);
+                result = ThemePresets.CreateDefault(colorMode);
             }
 
             result.Normalize();
@@ -328,6 +343,9 @@ namespace NoFences.Theming
                 string serializedSettings = File.ReadAllText(settingsPath);
                 bool hasIndependentColorMode = serializedSettings.IndexOf(
                     "<DarkModeEnabled>",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                bool hasThemeSchemaVersion = serializedSettings.IndexOf(
+                    "<ThemeSchemaVersion>",
                     StringComparison.OrdinalIgnoreCase) >= 0;
 
                 var serializer = new XmlSerializer(typeof(ThemeSettings));
@@ -359,17 +377,25 @@ namespace NoFences.Theming
                             ThemePresets.CreateDefaultCustom(ThemeColorMode.Dark);
                     }
 
-                    // Preserve the user's visible appearance during migration, but
-                    // represent it explicitly as style + mode from this point on.
-                    loaded.DarkModeEnabled =
-                        string.Equals(
-                            loaded.SelectedThemeId,
-                            ThemeIds.Windows11,
-                            StringComparison.OrdinalIgnoreCase) ||
-                        (string.Equals(
-                            loaded.SelectedThemeId,
-                            ThemeIds.Custom,
-                            StringComparison.OrdinalIgnoreCase) && legacyCustomWasDark);
+                    // 第一版主题功能曾把程序最初的半透明外观误命名为
+                    // Windows 11。迁移时改用新的“默认”标识，既保持用户看到的
+                    // 原始外观，又让真正的 Win11 风格继续独立于黑暗模式。
+                    if (string.Equals(
+                        loaded.SelectedThemeId,
+                        ThemeIds.Windows11,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        loaded.SelectedThemeId = ThemeIds.Default;
+                        loaded.DarkModeEnabled = false;
+                    }
+                    else
+                    {
+                        loaded.DarkModeEnabled =
+                            string.Equals(
+                                loaded.SelectedThemeId,
+                                ThemeIds.Custom,
+                                StringComparison.OrdinalIgnoreCase) && legacyCustomWasDark;
+                    }
                 }
                 else if (loaded.CustomDarkTheme == null)
                 {
@@ -377,10 +403,24 @@ namespace NoFences.Theming
                         ThemePresets.CreateDefaultCustom(ThemeColorMode.Dark);
                 }
 
+                // 加入“默认”主题之前，Windows 11 同时承担隐式默认值。只对没有
+                // 新版本标记的旧配置执行一次迁移；迁移后用户若主动选回 Win11，
+                // 保存的版本标记会确保后续启动尊重该选择。XP 和自定义不受影响。
+                if ((!hasThemeSchemaVersion ||
+                     loaded.ThemeSchemaVersion < ThemeSettings.CurrentSchemaVersion) &&
+                    string.Equals(
+                        loaded.SelectedThemeId,
+                        ThemeIds.Windows11,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    loaded.SelectedThemeId = ThemeIds.Default;
+                }
+                loaded.ThemeSchemaVersion = ThemeSettings.CurrentSchemaVersion;
+
                 loaded.CustomTheme = PrepareCustomTheme(loaded.CustomTheme);
                 loaded.CustomDarkTheme = PrepareCustomTheme(loaded.CustomDarkTheme);
                 if (!IsKnownThemeInternal(loaded.SelectedThemeId))
-                    loaded.SelectedThemeId = ThemeIds.Windows11;
+                    loaded.SelectedThemeId = ThemeIds.Default;
                 return loaded;
             }
             catch

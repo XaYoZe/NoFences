@@ -3,11 +3,12 @@ using System.Drawing;
 namespace NoFences.Theming
 {
     /// <summary>
-    /// Stable theme identifiers are persisted instead of localized display names.
-    /// Third-party or future built-in themes can use their own unique identifier.
+    /// 主题配置持久化时使用稳定标识，而不是可能随语言变化的显示名称。
+    /// 后续内置主题或第三方主题只需增加自己的唯一标识即可。
     /// </summary>
     public static class ThemeIds
     {
+        public const string Default = "default";
         public const string Windows11 = "windows11";
         public const string WindowsXp = "windowsxp";
         public const string Custom = "custom";
@@ -61,19 +62,83 @@ namespace NoFences.Theming
     }
 
     /// <summary>
-    /// Factory for bundled styles and their independent color-mode variants.
-    ///
-    /// Windows 11 values follow the semantic WinUI resources: light surfaces use
-    /// SolidBackgroundFillColorBase (#F3F3F3), dark surfaces use #202020, and the
-    /// associated foreground/control surfaces keep readable contrast.  Windows XP
-    /// light values follow the Luna palette; its dark variant retains Luna's blue
-    /// accents and square geometry while using dark, high-contrast surfaces.
+    /// 创建程序内置主题及其独立的明暗模式变体。
+    /// “默认”主题精确还原主题功能加入前的黑色半透明栅栏；Windows 11 使用
+    /// WinUI 语义色，Windows XP 使用 Luna 配色。所有预置都集中在这里，
+    /// 新增主题时不需要在窗口绘制代码中增加主题名称判断。
     /// </summary>
     public static class ThemePresets
     {
         /// <summary>
-        /// Compatibility helper and default preset.  Windows 11 is a visual style,
-        /// not an alias for dark mode, so the parameterless form is always light.
+        /// 返回程序最初的经典半透明主题。无参数重载代表默认颜色模式。
+        /// </summary>
+        public static ThemeDefinition CreateDefault()
+        {
+            return CreateDefault(ThemeColorMode.Light);
+        }
+
+        /// <summary>
+        /// 创建经典半透明主题。栅栏主体在两种颜色模式下均保留最初的黑色
+        /// 半透明外观；独立的黑暗模式仅调整菜单、设置页等辅助界面的明度，
+        /// 因而不会把该主题与全局黑暗模式绑定在一起。
+        /// </summary>
+        public static ThemeDefinition CreateDefault(ThemeColorMode colorMode)
+        {
+            var theme = new ThemeDefinition
+            {
+                Name = "Default",
+                FontFamilyName = "Segoe UI",
+
+                // 主题功能加入前直接使用 Color.FromArgb(100, Color.Black)
+                // 和 Color.FromArgb(50, Color.Black)。百分比取最接近的 39%/20%。
+                MainPanelColorArgb = Color.Black.ToArgb(),
+                TitleBarColorArgb = Color.Black.ToArgb(),
+                MainPanelOpacityPercent = 39,
+                TitleBarOpacityPercent = 20,
+
+                TitleTextColorArgb = Color.White.ToArgb(),
+                ItemTextColorArgb = Color.White.ToArgb(),
+                ItemTextShadowColorArgb = Color.FromArgb(15, 15, 15).ToArgb(),
+                ItemHoverColorArgb = SystemColors.ActiveCaption.ToArgb(),
+                ItemSelectedColorArgb = SystemColors.GradientInactiveCaption.ToArgb(),
+                BorderColorArgb = SystemColors.ActiveBorder.ToArgb(),
+                ScrollBarColorArgb = Color.Black.ToArgb(),
+
+                // 右键菜单和设置页同样使用经典深色表面，避免栅栏切换到
+                // 半透明主题后仍弹出与主题无关的系统灰白色菜单。
+                MenuBackgroundColorArgb = Color.FromArgb(45, 45, 48).ToArgb(),
+                MenuTextColorArgb = Color.White.ToArgb(),
+                MenuHighlightColorArgb = Color.FromArgb(61, 111, 158).ToArgb(),
+                MenuHighlightTextColorArgb = Color.White.ToArgb(),
+                DialogBackgroundColorArgb = Color.FromArgb(45, 45, 48).ToArgb(),
+                DialogTextColorArgb = Color.White.ToArgb(),
+                ControlBackgroundColorArgb = Color.FromArgb(63, 63, 70).ToArgb(),
+                ControlTextColorArgb = Color.White.ToArgb(),
+                AccentColorArgb = Color.FromArgb(96, 205, 255).ToArgb(),
+                MenuStyle = ThemeMenuStyle.Standard,
+
+                CornerRadius = 0,
+                EnableBlur = true,
+                BackgroundImageLayout = ThemeImageLayout.Fill,
+                BackgroundImageOpacityPercent = 35
+            };
+
+            if (colorMode == ThemeColorMode.Dark)
+            {
+                // 黑暗模式是单独开关：只把辅助界面进一步压暗，不能改变
+                // 默认主题作为“经典半透明栅栏”的风格身份和透明参数。
+                theme.MenuBackgroundColorArgb = Color.FromArgb(32, 32, 32).ToArgb();
+                theme.MenuHighlightColorArgb = Color.FromArgb(61, 61, 61).ToArgb();
+                theme.DialogBackgroundColorArgb = Color.FromArgb(32, 32, 32).ToArgb();
+                theme.ControlBackgroundColorArgb = Color.FromArgb(45, 45, 48).ToArgb();
+            }
+
+            return theme;
+        }
+
+        /// <summary>
+        /// Windows 11 兼容重载。Windows 11 只是视觉风格，不代表黑暗模式，
+        /// 因此无参数重载始终返回浅色变体。
         /// </summary>
         public static ThemeDefinition CreateWindows11()
         {
@@ -104,13 +169,15 @@ namespace NoFences.Theming
                 ScrollBarColorArgb = Color.FromArgb(138, 138, 138).ToArgb(),
                 MenuBackgroundColorArgb = Color.FromArgb(249, 249, 249).ToArgb(),
                 MenuTextColorArgb = Color.FromArgb(26, 26, 26).ToArgb(),
-                MenuHighlightColorArgb = Color.FromArgb(229, 243, 255).ToArgb(),
+                // Win11 菜单悬停采用低对比度中性灰，而不是 XP 式蓝色高亮。
+                MenuHighlightColorArgb = Color.FromArgb(238, 238, 238).ToArgb(),
                 MenuHighlightTextColorArgb = Color.FromArgb(26, 26, 26).ToArgb(),
                 DialogBackgroundColorArgb = Color.FromArgb(243, 243, 243).ToArgb(),
                 DialogTextColorArgb = Color.FromArgb(26, 26, 26).ToArgb(),
                 ControlBackgroundColorArgb = Color.White.ToArgb(),
                 ControlTextColorArgb = Color.FromArgb(26, 26, 26).ToArgb(),
                 AccentColorArgb = Color.FromArgb(0, 103, 192).ToArgb(),
+                MenuStyle = ThemeMenuStyle.Windows11,
                 MainPanelOpacityPercent = 86,
                 TitleBarOpacityPercent = 82,
                 CornerRadius = 12,
@@ -136,7 +203,7 @@ namespace NoFences.Theming
             theme.ScrollBarColorArgb = Color.FromArgb(157, 157, 157).ToArgb();
             theme.MenuBackgroundColorArgb = Color.FromArgb(44, 44, 44).ToArgb();
             theme.MenuTextColorArgb = Color.White.ToArgb();
-            theme.MenuHighlightColorArgb = Color.FromArgb(69, 69, 69).ToArgb();
+            theme.MenuHighlightColorArgb = Color.FromArgb(61, 61, 61).ToArgb();
             theme.MenuHighlightTextColorArgb = Color.White.ToArgb();
             theme.DialogBackgroundColorArgb = Color.FromArgb(32, 32, 32).ToArgb();
             theme.DialogTextColorArgb = Color.White.ToArgb();
@@ -173,7 +240,7 @@ namespace NoFences.Theming
                 ItemSelectedColorArgb = Color.FromArgb(49, 106, 197).ToArgb(),
                 BorderColorArgb = Color.FromArgb(127, 157, 185).ToArgb(),
                 ScrollBarColorArgb = Color.FromArgb(172, 168, 153).ToArgb(),
-                MenuBackgroundColorArgb = Color.FromArgb(245, 244, 234).ToArgb(),
+                MenuBackgroundColorArgb = Color.FromArgb(236, 233, 216).ToArgb(),
                 MenuTextColorArgb = Color.Black.ToArgb(),
                 MenuHighlightColorArgb = Color.FromArgb(49, 106, 197).ToArgb(),
                 MenuHighlightTextColorArgb = Color.White.ToArgb(),
@@ -182,6 +249,7 @@ namespace NoFences.Theming
                 ControlBackgroundColorArgb = Color.White.ToArgb(),
                 ControlTextColorArgb = Color.Black.ToArgb(),
                 AccentColorArgb = Color.FromArgb(0, 84, 227).ToArgb(),
+                MenuStyle = ThemeMenuStyle.WindowsXp,
                 MainPanelOpacityPercent = 100,
                 TitleBarOpacityPercent = 100,
                 CornerRadius = 0,

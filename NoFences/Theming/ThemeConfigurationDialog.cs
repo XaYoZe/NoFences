@@ -30,6 +30,7 @@ namespace NoFences.Theming
         private readonly TextBox fontFamilyTextBox = new TextBox();
         private readonly TextBox imagePathTextBox = new TextBox();
         private readonly ComboBox imageLayoutComboBox = new ComboBox();
+        private readonly ComboBox menuStyleComboBox = new ComboBox();
         private readonly Button browseImageButton = new Button();
         private readonly Button clearImageButton = new Button();
         private readonly Label customHintLabel = new Label();
@@ -137,9 +138,8 @@ namespace NoFences.Theming
             copyToCustomButton.Click += CopyToCustomButton_Click;
             header.Controls.Add(copyToCustomButton, 2, 0);
 
-            // Color mode is intentionally a separate row/control, not another
-            // entry in the theme list. This keeps style identity (Win11/XP/custom)
-            // independent from the application-wide Light/Dark choice.
+            // 明暗模式必须是独立控件，而不是“默认/Win11/XP/自定义”列表中的
+            // 另一个主题。这样主题负责风格身份，开关只负责全局颜色模式。
             darkModeCheckBox.Text = T(
                 "黑暗模式（独立于主题风格）",
                 "Dark mode (independent of theme style)");
@@ -171,6 +171,17 @@ namespace NoFences.Theming
         {
             var layout = CreateTwoColumnEditor();
             AddEditorRow(layout, T("字体名称", "Font family"), fontFamilyTextBox);
+            menuStyleComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            menuStyleComboBox.Items.Add(new MenuStyleChoice(
+                ThemeMenuStyle.Standard,
+                T("标准 / 经典半透明", "Standard / classic translucent")));
+            menuStyleComboBox.Items.Add(new MenuStyleChoice(
+                ThemeMenuStyle.Windows11,
+                "Windows 11"));
+            menuStyleComboBox.Items.Add(new MenuStyleChoice(
+                ThemeMenuStyle.WindowsXp,
+                "Windows XP"));
+            AddEditorRow(layout, T("右键菜单风格", "Context menu style"), menuStyleComboBox);
             AddEditorRow(layout, T("圆角半径 (px)", "Corner radius (px)"), ConfigureNumber(cornerRadiusInput, 0, 48, " px"));
             AddEditorRow(layout, T("主面板不透明度 (%)", "Panel opacity (%)"), ConfigureNumber(panelOpacityInput, 20, 100, "%"));
             AddEditorRow(layout, T("标题栏不透明度 (%)", "Title opacity (%)"), ConfigureNumber(titleOpacityInput, 20, 100, "%"));
@@ -187,12 +198,13 @@ namespace NoFences.Theming
             AddSpanningRow(layout, customHintLabel);
 
             fontFamilyTextBox.TextChanged += CustomValueChanged;
+            menuStyleComboBox.SelectedIndexChanged += CustomValueChanged;
             cornerRadiusInput.ValueChanged += CustomValueChanged;
             panelOpacityInput.ValueChanged += CustomValueChanged;
             titleOpacityInput.ValueChanged += CustomValueChanged;
             blurCheckBox.CheckedChanged += CustomValueChanged;
 
-            AddCustomControls(fontFamilyTextBox, cornerRadiusInput, panelOpacityInput,
+            AddCustomControls(fontFamilyTextBox, menuStyleComboBox, cornerRadiusInput, panelOpacityInput,
                 titleOpacityInput, blurCheckBox);
             return WrapEditor(layout);
         }
@@ -439,6 +451,7 @@ namespace NoFences.Theming
             {
                 loadedEditorColorMode = colorMode;
                 fontFamilyTextBox.Text = theme.FontFamilyName;
+                SelectMenuStyle(theme.MenuStyle);
                 cornerRadiusInput.Value = theme.CornerRadius;
                 panelOpacityInput.Value = theme.MainPanelOpacityPercent;
                 titleOpacityInput.Value = theme.TitleBarOpacityPercent;
@@ -512,6 +525,9 @@ namespace NoFences.Theming
             // variant (or vice versa) while the independent switch is changing.
             var customTheme = GetCustomTheme(loadedEditorColorMode);
             customTheme.FontFamilyName = fontFamilyTextBox.Text.Trim();
+            var menuStyle = menuStyleComboBox.SelectedItem as MenuStyleChoice;
+            if (menuStyle != null)
+                customTheme.MenuStyle = menuStyle.Value;
             customTheme.CornerRadius = (int)cornerRadiusInput.Value;
             customTheme.MainPanelOpacityPercent = (int)panelOpacityInput.Value;
             customTheme.TitleBarOpacityPercent = (int)titleOpacityInput.Value;
@@ -532,6 +548,21 @@ namespace NoFences.Theming
             foreach (var editor in colorEditors)
                 UpdateColorButton(editor, theme);
             previewControl.Theme = theme;
+        }
+
+        /// <summary>按持久化枚举值选中对应的菜单结构风格。</summary>
+        private void SelectMenuStyle(ThemeMenuStyle style)
+        {
+            for (int i = 0; i < menuStyleComboBox.Items.Count; i++)
+            {
+                var choice = (MenuStyleChoice)menuStyleComboBox.Items[i];
+                if (choice.Value == style)
+                {
+                    menuStyleComboBox.SelectedIndex = i;
+                    return;
+                }
+            }
+            menuStyleComboBox.SelectedIndex = 0;
         }
 
         private void UpdateColorButton(ColorEditor editor, ThemeDefinition theme)
@@ -647,7 +678,7 @@ namespace NoFences.Theming
         {
             WriteControlsToCustomTheme();
             var choice = themeComboBox.SelectedItem as ThemeChoice;
-            string id = choice != null ? choice.Id : ThemeIds.Windows11;
+            string id = choice != null ? choice.Id : ThemeIds.Default;
             ThemeManager.Instance.ApplySelection(
                 id,
                 customLightTheme,
@@ -703,6 +734,22 @@ namespace NoFences.Theming
             public override string ToString() => DisplayName;
         }
 
+        /// <summary>下拉框显示文字与可持久化菜单风格枚举的映射项。</summary>
+        private sealed class MenuStyleChoice
+        {
+            public MenuStyleChoice(ThemeMenuStyle value, string displayName)
+            {
+                Value = value;
+                DisplayName = displayName;
+            }
+
+            public ThemeMenuStyle Value { get; }
+
+            public string DisplayName { get; }
+
+            public override string ToString() => DisplayName;
+        }
+
         private sealed class ColorEditor
         {
             public ColorEditor(
@@ -729,7 +776,7 @@ namespace NoFences.Theming
     /// </summary>
     internal sealed class ThemePreviewControl : Control
     {
-        private ThemeDefinition theme = ThemePresets.CreateWindows11();
+        private ThemeDefinition theme = ThemePresets.CreateDefault();
         private Image backgroundImage;
 
         public ThemePreviewControl()
@@ -746,7 +793,7 @@ namespace NoFences.Theming
             get => theme.Clone();
             set
             {
-                theme = value != null ? value.Clone() : ThemePresets.CreateWindows11();
+                theme = value != null ? value.Clone() : ThemePresets.CreateDefault();
                 backgroundImage?.Dispose();
                 backgroundImage = ThemeDrawing.LoadImageWithoutLock(theme.BackgroundImagePath);
                 BackColor = theme.DialogBackgroundColor;
@@ -838,10 +885,29 @@ namespace NoFences.Theming
 
         private void DrawMenu(Graphics graphics, Rectangle bounds)
         {
+            MenuThemeProfile profile = MenuThemeProfile.Create(theme);
+            int preferredHeight = profile.MenuPadding.Vertical +
+                profile.ItemHeight * 3 +
+                profile.SeparatorHeight;
+            bounds.Height = Math.Min(bounds.Height, preferredHeight);
+
+            // 预览与真实 ContextMenuStrip 使用相同 Profile：Win11 显示 8px
+            // 圆角和宽松行距，XP 显示方形 3D 边框与紧凑行高。
+            using (var shadowPath = ThemeDrawing.CreateRoundedRectangle(
+                new Rectangle(bounds.X + 2, bounds.Y + 3, bounds.Width, bounds.Height),
+                profile.ContainerCornerRadius))
+            using (var shadow = new SolidBrush(Color.FromArgb(
+                profile.Style == ThemeMenuStyle.Windows11 ? 28 : 18,
+                Color.Black)))
+                graphics.FillPath(shadow, shadowPath);
+
+            using (var surfacePath = ThemeDrawing.CreateRoundedRectangle(
+                bounds,
+                profile.ContainerCornerRadius))
             using (var background = new SolidBrush(theme.MenuBackgroundColor))
-                graphics.FillRectangle(background, bounds);
-            using (var border = new Pen(theme.BorderColor))
-                graphics.DrawRectangle(border, bounds);
+                graphics.FillPath(background, surfacePath);
+
+            DrawPreviewMenuBorder(graphics, bounds, profile);
 
             string[] items =
             {
@@ -849,21 +915,156 @@ namespace NoFences.Theming
                 ThemeText.Get("主题风格...", "Theme..."),
                 ThemeText.Get("新建桌面分区", "New fence")
             };
-            using (var font = CreateThemeFont(9f, FontStyle.Regular))
+            ThemedMenuIcon[] icons =
             {
+                ThemedMenuIcon.Lock,
+                ThemedMenuIcon.Theme,
+                ThemedMenuIcon.NewFence
+            };
+            using (var font = CreateMenuFont(profile))
+            {
+                int x = bounds.X + profile.MenuPadding.Left;
+                int width = bounds.Width - profile.MenuPadding.Horizontal;
+                int y = bounds.Y + profile.MenuPadding.Top;
                 for (int i = 0; i < items.Length; i++)
                 {
-                    var itemBounds = new Rectangle(bounds.X + 3, bounds.Y + 6 + i * 36, bounds.Width - 6, 30);
+                    if (i == 2)
+                    {
+                        DrawPreviewSeparator(graphics, bounds, y, profile);
+                        y += profile.SeparatorHeight;
+                    }
+
+                    var itemBounds = new Rectangle(x, y, width, profile.ItemHeight);
                     bool highlighted = i == 1;
                     if (highlighted)
                     {
+                        var highlightBounds = itemBounds;
+                        highlightBounds.Inflate(
+                            -profile.ItemHorizontalInset,
+                            -profile.ItemVerticalInset);
                         using (var highlight = new SolidBrush(theme.MenuHighlightColor))
-                            graphics.FillRectangle(highlight, itemBounds);
+                        using (var highlightPath = ThemeDrawing.CreateRoundedRectangle(
+                            highlightBounds,
+                            profile.ItemCornerRadius))
+                            graphics.FillPath(highlight, highlightPath);
                     }
+
                     Color textColor = highlighted ? theme.MenuHighlightTextColor : theme.MenuTextColor;
-                    TextRenderer.DrawText(graphics, items[i], font, itemBounds, textColor,
+                    using (Image icon = ThemedMenuIconFactory.Create(icons[i], theme))
+                        graphics.DrawImageUnscaled(
+                            icon,
+                            itemBounds.X + 8,
+                            itemBounds.Y + (itemBounds.Height - icon.Height) / 2);
+                    var textBounds = new Rectangle(
+                        itemBounds.X + 28 + profile.ItemPadding.Left,
+                        itemBounds.Y,
+                        Math.Max(1, itemBounds.Width - 48 - profile.ItemPadding.Horizontal),
+                        itemBounds.Height);
+                    TextRenderer.DrawText(graphics, items[i], font, textBounds, textColor,
                         TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+                    if (i == 1)
+                    {
+                        DrawPreviewArrow(
+                            graphics,
+                            new Point(itemBounds.Right - 13, itemBounds.Top + itemBounds.Height / 2),
+                            textColor,
+                            profile.DrawChevronArrow);
+                    }
+                    y += profile.ItemHeight;
                 }
+            }
+        }
+
+        private static void DrawPreviewMenuBorder(
+            Graphics graphics,
+            Rectangle bounds,
+            MenuThemeProfile profile)
+        {
+            if (profile.DrawClassicThreeDimensionalBorder)
+            {
+                using (var outer = new Pen(profile.BorderOuterColor))
+                    graphics.DrawRectangle(outer, bounds);
+                using (var highlight = new Pen(profile.BorderHighlightColor))
+                using (var shadow = new Pen(profile.BorderShadowColor))
+                {
+                    graphics.DrawLine(highlight, bounds.Left + 1, bounds.Top + 1,
+                        bounds.Right - 2, bounds.Top + 1);
+                    graphics.DrawLine(highlight, bounds.Left + 1, bounds.Top + 1,
+                        bounds.Left + 1, bounds.Bottom - 2);
+                    graphics.DrawLine(shadow, bounds.Left + 1, bounds.Bottom - 2,
+                        bounds.Right - 2, bounds.Bottom - 2);
+                    graphics.DrawLine(shadow, bounds.Right - 2, bounds.Top + 1,
+                        bounds.Right - 2, bounds.Bottom - 2);
+                }
+                return;
+            }
+
+            using (var borderPath = ThemeDrawing.CreateRoundedRectangle(
+                new RectangleF(
+                    bounds.X + 0.5f,
+                    bounds.Y + 0.5f,
+                    bounds.Width - 1f,
+                    bounds.Height - 1f),
+                profile.ContainerCornerRadius))
+            using (var border = new Pen(profile.BorderOuterColor))
+                graphics.DrawPath(border, borderPath);
+        }
+
+        private static void DrawPreviewSeparator(
+            Graphics graphics,
+            Rectangle bounds,
+            int y,
+            MenuThemeProfile profile)
+        {
+            int lineY = y + profile.SeparatorHeight / 2;
+            int left = bounds.Left + profile.SeparatorInset;
+            int right = bounds.Right - profile.SeparatorInset;
+            using (var primary = new Pen(profile.SeparatorPrimaryColor))
+                graphics.DrawLine(primary, left, lineY, right, lineY);
+            if (profile.SeparatorSecondaryColor.A > 0)
+            {
+                using (var secondary = new Pen(profile.SeparatorSecondaryColor))
+                    graphics.DrawLine(secondary, left, lineY + 1, right, lineY + 1);
+            }
+        }
+
+        private static void DrawPreviewArrow(
+            Graphics graphics,
+            Point center,
+            Color color,
+            bool chevron)
+        {
+            Point[] points =
+            {
+                new Point(center.X - 2, center.Y - 4),
+                new Point(center.X + 2, center.Y),
+                new Point(center.X - 2, center.Y + 4)
+            };
+            if (!chevron)
+            {
+                using (var brush = new SolidBrush(color))
+                    graphics.FillPolygon(brush, points);
+                return;
+            }
+
+            using (var pen = new Pen(color, 1.35f))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                graphics.DrawLines(pen, points);
+            }
+        }
+
+        private Font CreateMenuFont(MenuThemeProfile profile)
+        {
+            try
+            {
+                return new Font(profile.FontFamilyName, profile.FontSize, FontStyle.Regular);
+            }
+            catch
+            {
+                return CreateThemeFont(profile.FontSize, FontStyle.Regular);
             }
         }
 
