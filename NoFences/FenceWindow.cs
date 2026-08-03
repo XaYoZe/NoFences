@@ -600,24 +600,65 @@ namespace NoFences
         {
             if (MessageBox.Show(this, "Really remove this fence?", "Remove", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
-                FenceManager.Instance.RemoveFence(fenceInfo);
-                Close();
+                string error;
+                if (FenceManager.Instance.TryRemoveFence(fenceInfo, out error))
+                {
+                    Close();
+                }
+                else
+                {
+                    MessageBox.Show(
+                        this,
+                        "Unable to restore all desktop shortcuts. The fence was kept to protect its files.\n\n" + error,
+                        "Remove fence",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    Refresh();
+                }
             }
         }
 
         /// <summary>退出整个应用程序，关闭所有栅栏窗口。</summary>
         private void quitApplicationToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            Application.Exit();
+            string error;
+            if (FenceManager.Instance.TryRestoreDesktopShortcutsForExit(out error))
+            {
+                Application.Exit();
+            }
+            else
+            {
+                MessageBox.Show(
+                    this,
+                    "Some desktop shortcuts could not be restored. No files were overwritten and the application will remain open.\n\n" + error,
+                    "Exit NoFences",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                Refresh();
+            }
         }
 
         /// <summary>从栅栏中删除当前悬停的条目。</summary>
         private void deleteItemToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            fenceInfo.Files.Remove(hoveringItem);
-            hoveringItem = null;
-            Save();
-            Refresh();
+            string item = hoveringItem;
+            string error;
+            if (FenceManager.Instance.TryRemoveEntry(fenceInfo, item, out error))
+            {
+                hoveringItem = null;
+                if (selectedItem == item)
+                    selectedItem = null;
+                Refresh();
+            }
+            else
+            {
+                MessageBox.Show(
+                    this,
+                    "Unable to restore the desktop shortcut. The item remains in the fence.\n\n" + error,
+                    "Remove item",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
 
         /// <summary>
@@ -640,15 +681,34 @@ namespace NoFences
                 e.Effect = DragDropEffects.Move;
         }
 
-        /// <summary>拖放释放：将文件添加到栅栏（去重，仅添加存在的文件）。</summary>
+        /// <summary>
+        /// 拖放释放：普通路径加入栅栏；桌面快捷方式则记录坐标并搬入托管目录。
+        /// 任一条目失败时保留原文件，并在处理其余条目后统一提示。
+        /// </summary>
         private void FenceWindow_DragDrop(object sender, DragEventArgs e)
         {
             var dropped = (string[])e.Data.GetData(DataFormats.FileDrop);
+            var errors = new List<string>();
             foreach (var file in dropped)
-                if (!fenceInfo.Files.Contains(file) && ItemExists(file))
-                    fenceInfo.Files.Add(file);
-            Save();
+            {
+                if (!ItemExists(file))
+                    continue;
+
+                string error;
+                if (!FenceManager.Instance.TryAddEntry(fenceInfo, file, out error))
+                    errors.Add(Path.GetFileName(file) + ": " + error);
+            }
+
             Refresh();
+            if (errors.Count > 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "Some items could not be added:\n\n" + string.Join(Environment.NewLine, errors),
+                    "Add items",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
 
         /// <summary>窗口大小变化：节流保存新尺寸（4 秒延迟）。</summary>
@@ -1219,21 +1279,25 @@ namespace NoFences
         /// <summary>
         /// 鼠标右键点击处理。
         /// - 右键悬停条目：显示 Shell 上下文菜单
-        /// - Shift+右键 或 右键空白区域：显示应用自身的上下文菜单
+        /// - 托管快捷方式、Shift+右键或右键空白区域：显示应用自身的上下文菜单
+        /// 托管快捷方式不开放 Shell 删除/重命名，避免绕过桌面恢复事务。
         /// </summary>
         private void FenceWindow_MouseClick(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Right)
                 return;
 
-            if (hoveringItem != null && !ModifierKeys.HasFlag(Keys.Shift))
+            bool isManagedDesktopEntry = hoveringItem != null &&
+                FenceManager.Instance.IsManagedDesktopEntry(fenceInfo, hoveringItem);
+            if (hoveringItem != null && !isManagedDesktopEntry &&
+                !ModifierKeys.HasFlag(Keys.Shift))
             {
                 // 右键条目 → Windows Shell 右键菜单
                 shellContextMenu.ShowContextMenu(new[] { new FileInfo(hoveringItem) }, MousePosition);
             }
             else
             {
-                // Shift+右键 或 空白处 → 应用菜单
+                // 托管快捷方式、Shift+右键或空白处 → 应用菜单
                 appContextMenu.Show(this, e.Location);
             }
         }

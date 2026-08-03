@@ -66,6 +66,8 @@
       <DependentUpon>HeightDialog.cs</DependentUpon>
     </Compile>
     <Compile Include="Model\EntryType.cs" />
+    <Compile Include="Model\DesktopShortcutInfo.cs" />
+    <Compile Include="Model\DesktopShortcutManager.cs" />
     <Compile Include="Model\FenceEntry.cs" />
     <Compile Include="Model\FenceInfo.cs" />
     <Compile Include="Model\FenceManager.cs" />

@@ -28,17 +28,38 @@ namespace NoFences
                 {
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
+                    Application.ApplicationExit += Application_ApplicationExit;
 
                     // 从 %LocalAppData%/NoFences/ 加载已有栅栏
-                    FenceManager.Instance.LoadFences();
+                    string startupWarning = FenceManager.Instance.LoadFences();
                     // 首次运行：创建默认栅栏
                     if (Application.OpenForms.Count == 0)
                         FenceManager.Instance.CreateFence("First fence");
+
+                    if (!string.IsNullOrWhiteSpace(startupWarning))
+                    {
+                        MessageBox.Show(
+                            "Some desktop shortcut operations could not be completed. No files were overwritten.\n\n" + startupWarning,
+                            "NoFences startup",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
 
                     // 进入 WinForms 消息循环（无主窗体，由各 FenceWindow 自行驱动）
                     Application.Run();
                 }
             }
+        }
+
+        /// <summary>
+        /// 为非菜单触发的正常退出提供最后一道恢复保障。
+        /// 错误写入跟踪日志；搬移事务仍保存在 XML 中供下次启动继续处理。
+        /// </summary>
+        private static void Application_ApplicationExit(object sender, EventArgs e)
+        {
+            string error;
+            if (!FenceManager.Instance.TryRestoreDesktopShortcutsForExit(out error))
+                System.Diagnostics.Trace.WriteLine("Desktop shortcut restore failed: " + error);
         }
 
     }

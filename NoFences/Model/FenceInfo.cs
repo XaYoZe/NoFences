@@ -47,6 +47,18 @@ namespace NoFences.Model
         /// <summary>栅栏内包含的文件/文件夹路径列表</summary>
         public List<string> Files { get; set; } = new List<string>();
 
+        /// <summary>
+        /// 由当前栅栏临时移出桌面的快捷方式及其恢复信息。
+        /// 新增属性对旧版 XML 向后兼容，旧数据反序列化时得到空列表。
+        /// </summary>
+        public List<DesktopShortcutInfo> DesktopShortcuts { get; set; } = new List<DesktopShortcutInfo>();
+
+        /// <summary>
+        /// 是否已确认删除栅栏但仍在等待快捷方式恢复完成。
+        /// 用于在异常退出后继续恢复，避免直接删除仍含快捷方式的数据目录。
+        /// </summary>
+        public bool PendingRemoval { get; set; }
+
         public FenceInfo()
         {
 
