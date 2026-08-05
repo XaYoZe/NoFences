@@ -6,6 +6,7 @@ using Peter;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -18,7 +19,6 @@ namespace NoFences
         private int logicalTitleHeight;
         private int titleHeight;
         private const int titleOffset = 3;
-        private const float shadowDist = 1.5f;
 
         // 图标与文字布局尺寸（根据桌面图标大小动态计算）
         private int iconSize;        // 图标边长（设备像素，直接用于 GDI+ 绘制）
@@ -249,7 +249,8 @@ namespace NoFences
         /// 从 SPI_GETICONMETRICS 返回的 LOGFONT 结构体创建 .NET Font 对象。
         /// 不能使用 CreateFontIndirect + Font.FromHfont，因为 FromHfont 仅支持 TrueType 字体，
         /// 而桌面图标字体可能是非 TrueType 字体（如 MS Sans Serif），会抛出异常。
-        /// 改为直接读取 LOGFONT 各字段，手动构造 Font 对象。
+        /// 改为直接读取 LOGFONT 各字段，手动构造常规字重 Font 对象；文字
+        /// 清晰度由 DPI 自适应的柔和阴影补足，避免小字号字形显得过粗。
         /// </summary>
         private Font CreateIconFontFromLogFont()
         {
@@ -269,16 +270,17 @@ namespace NoFences
                     fontSize = fontSize * 72f / g.DpiY;
                 }
                 if (fontSize < 6f) fontSize = 9f; // 最小字号保护
+                // 使用字体的常规字重，并继续应用 LOGFONT 中的斜体、下划线
+                // 和删除线信息；可读性由后续柔和阴影提供，不再依赖半粗体。
                 var style = FontStyle.Regular;
                 if (lf.lfItalic != 0) style |= FontStyle.Italic;
-                if (lf.lfWeight >= 700) style |= FontStyle.Bold;
                 if (lf.lfUnderline != 0) style |= FontStyle.Underline;
                 if (lf.lfStrikeOut != 0) style |= FontStyle.Strikeout;
                 return new Font(familyName, fontSize, style);
             }
             catch
             {
-                return new Font("Segoe UI", 9f);
+                return new Font("Segoe UI", 9f, FontStyle.Regular);
             }
         }
 
@@ -394,8 +396,8 @@ namespace NoFences
         }
 
         /// <summary>
-        /// 根据当前菜单风格重新生成应用菜单图标。Win11 使用单色 Fluent 线条，
-        /// XP 使用彩色高对比图标；主题切换前释放旧位图，避免长期运行泄漏 GDI。
+        /// 根据当前菜单风格重新生成应用菜单图标。Win11/Standard 使用彩色矢量
+        /// 风格，XP 使用经典高对比图标；主题切换前释放旧位图，避免长期运行泄漏 GDI。
         /// </summary>
         private void ApplyContextMenuIcons()
         {
@@ -933,7 +935,7 @@ namespace NoFences
         {
             var theme = currentTheme ?? ThemePresets.CreateDefault();
             e.Graphics.SetClip(ClientRectangle);
-            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
             e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
@@ -1069,14 +1071,16 @@ namespace NoFences
                 var gap = expandTextPadding;
                 var expandOutlineRect = new Rectangle(expandEntryX - 2, expandEntryY - 2,
                     itemWidth + 2, iconSize + (int)drawHeight + gap + 2);
-                var expandOutlineRectInner = expandOutlineRect.Shrink(1);
-                using (var selectedBrush = new SolidBrush(
-                    ThemeDrawing.WithAlpha(theme.ItemSelectedColor, 115)))
-                using (var selectedPen = new Pen(
-                    ThemeDrawing.WithAlpha(theme.BorderColor, 190)))
+                var expandMousePos = PointToClient(MousePosition);
+                bool expandMouseOver = expandOutlineRect.Contains(expandMousePos);
+                if (theme.MenuStyle != ThemeMenuStyle.WindowsXp)
                 {
-                    e.Graphics.FillRectangle(selectedBrush, expandOutlineRect);
-                    e.Graphics.DrawRectangle(selectedPen, expandOutlineRectInner);
+                    DrawModernDesktopItemState(
+                        e.Graphics,
+                        expandOutlineRect,
+                        true,
+                        expandMouseOver,
+                        theme);
                 }
 
                 // 重绘图标（图层在最上方，防止被高亮框覆盖变模糊）
@@ -1084,47 +1088,22 @@ namespace NoFences
                 if (expandIcon != null)
                 {
                     var expandIconRect = new Rectangle(expandEntryX + itemWidth / 2 - iconSize / 2, expandEntryY, iconSize, iconSize);
-                    DrawIconHighQuality(e.Graphics, expandIcon, expandIconRect);
+                    DrawDesktopIconForState(
+                        e.Graphics,
+                        expandIcon,
+                        expandIconRect,
+                        true,
+                        theme);
                 }
 
-                // 绘制文字阴影
-                using (var shadowBrush = new SolidBrush(
-                    ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 180)))
-                using (var textBrush = new SolidBrush(theme.ItemTextColor))
-                {
-                    e.Graphics.DrawString(
-                        expandEntryName,
-                        iconFont,
-                        shadowBrush,
-                        new RectangleF(expandTextPos.Move(shadowDist, shadowDist), drawSize),
-                        expandFormat);
-                    e.Graphics.DrawString(
-                        expandEntryName,
-                        iconFont,
-                        textBrush,
-                        new RectangleF(expandTextPos, drawSize),
-                        expandFormat);
-                }
-
-                // 鼠标悬浮时叠加高亮（使用与展开高亮框一致的尺寸，降低透明度让选中态更明显）
-                var expandMousePos = PointToClient(MousePosition);
-                if (expandMousePos.X >= expandEntryX - 2 && expandMousePos.Y >= expandEntryY - 2 &&
-                    expandMousePos.X < expandEntryX + itemWidth + 2 &&
-                    expandMousePos.Y < expandEntryY + iconSize + (int)drawHeight + gap + 2)
-                {
-                    Color combinedColor = ThemeDrawing.Mix(
-                        theme.ItemSelectedColor,
-                        theme.ItemHoverColor,
-                        0.35f);
-                    using (var hoverBrush = new SolidBrush(
-                        ThemeDrawing.WithAlpha(combinedColor, 45)))
-                    using (var hoverPen = new Pen(
-                        ThemeDrawing.WithAlpha(theme.BorderColor, 80)))
-                    {
-                        e.Graphics.FillRectangle(hoverBrush, expandOutlineRect);
-                        e.Graphics.DrawRectangle(hoverPen, expandOutlineRectInner);
-                    }
-                }
+                DrawDesktopIconTextForState(
+                    e.Graphics,
+                    expandEntryName,
+                    new RectangleF(expandTextPos, drawSize),
+                    expandFormat,
+                    theme,
+                    true,
+                    expandMouseOver);
             }
 
             // 计算内容溢出高度（用于滚动条），确保不会出现负值
@@ -1215,7 +1194,6 @@ namespace NoFences
             var textSize = g.MeasureString(name, iconFont, textMaxSize, stringFormat);
             var gap = textPadding;
             var outlineRect = new Rectangle(x - 2, y - 2, itemWidth + 2, iconSize + (int)textSize.Height + gap + 2);
-            var outlineRectInner = outlineRect.Shrink(1);
 
             var mousePos = PointToClient(MousePosition);
             var mouseOver = mousePos.X >= x && mousePos.Y >= y && mousePos.X < x + outlineRect.Width && mousePos.Y < y + outlineRect.Height;
@@ -1241,47 +1219,24 @@ namespace NoFences
                 entry.Open();
             }
 
-            // 绘制选中/悬停背景
+            // 绘制选中/悬停背景。XP 默认悬浮无反馈，且选中效果由后续的
+            // 图标染色和文字实色底组成，因此这里只处理现代整项高亮。
             bool selected = isIconManagementMode
                 ? iconManagementSelection.Contains(entry.Path)
                 : selectedItem == entry.Path;
-            if (!skipText && (selected || mouseOver))
+            if (!skipText && theme.MenuStyle != ThemeMenuStyle.WindowsXp)
             {
-                Color stateColor;
-                int stateAlpha;
-                if (selected && mouseOver)
-                {
-                    stateColor = ThemeDrawing.Mix(
-                        theme.ItemSelectedColor,
-                        theme.ItemHoverColor,
-                        0.35f);
-                    stateAlpha = 145;
-                }
-                else if (selected)
-                {
-                    stateColor = theme.ItemSelectedColor;
-                    stateAlpha = 115;
-                }
-                else
-                {
-                    stateColor = theme.ItemHoverColor;
-                    stateAlpha = 95;
-                }
-
-                using (var stateBrush = new SolidBrush(
-                    ThemeDrawing.WithAlpha(stateColor, stateAlpha)))
-                using (var statePen = new Pen(ThemeDrawing.WithAlpha(
-                    theme.BorderColor,
-                    selected ? 190 : 145)))
-                {
-                    g.FillRectangle(stateBrush, outlineRect);
-                    g.DrawRectangle(statePen, outlineRectInner);
-                }
+                DrawModernDesktopItemState(
+                    g,
+                    outlineRect,
+                    selected,
+                    mouseOver,
+                    theme);
             }
 
             // 绘制图标（居中缩放至 iconSize × iconSize）
             var iconRect = new Rectangle(x + itemWidth / 2 - iconSize / 2, y, iconSize, iconSize);
-            DrawIconHighQuality(g, icon, iconRect);
+            DrawDesktopIconForState(g, icon, iconRect, selected, theme);
             if (isIconManagementMode)
                 DrawIconManagementCheck(g, iconRect, selected, theme);
 
@@ -1289,26 +1244,355 @@ namespace NoFences
             if (skipText)
                 return outlineRect;
 
-            // 绘制文字（先画阴影偏移，再画白色前景）
-            using (var shadowBrush = new SolidBrush(
-                ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 180)))
-            using (var textBrush = new SolidBrush(theme.ItemTextColor))
-            {
-                g.DrawString(
-                    name,
-                    iconFont,
-                    shadowBrush,
-                    new RectangleF(textPosition.Move(shadowDist, shadowDist), textMaxSize),
-                    stringFormat);
-                g.DrawString(
-                    name,
-                    iconFont,
-                    textBrush,
-                    new RectangleF(textPosition, textMaxSize),
-                    stringFormat);
-            }
+            DrawDesktopIconTextForState(
+                g,
+                name,
+                new RectangleF(textPosition, textMaxSize),
+                stringFormat,
+                theme,
+                selected,
+                mouseOver);
 
             return outlineRect;
+        }
+
+        /// <summary>
+        /// 绘制默认和 Win11 风格的整项状态层。颜色会根据面板明暗选择规范中的
+        /// 深/浅覆盖方案，高亮范围始终使用动态计算后的完整项目矩形。
+        /// </summary>
+        private void DrawModernDesktopItemState(
+            Graphics graphics,
+            Rectangle bounds,
+            bool selected,
+            bool hovered,
+            ThemeDefinition theme)
+        {
+            if (!selected && !hovered)
+                return;
+
+            Color fillColor;
+            Color strokeColor;
+            int fillAlpha;
+            int strokeAlpha;
+
+            if (SystemInformation.HighContrast)
+            {
+                fillColor = SystemColors.Highlight;
+                strokeColor = selected
+                    ? SystemColors.HighlightText
+                    : SystemColors.WindowText;
+                fillAlpha = 255;
+                strokeAlpha = 255;
+            }
+            else
+            {
+                bool darkSurface = ThemeDrawing.IsDark(theme.MainPanelColor);
+                if (selected && hovered)
+                {
+                    fillColor = Color.FromArgb(95, 145, 195);
+                    strokeColor = Color.FromArgb(220, 238, 252);
+                    fillAlpha = 61;   // 24%
+                    strokeAlpha = 148; // 58%
+                }
+                else if (selected)
+                {
+                    fillColor = darkSurface
+                        ? Color.FromArgb(130, 175, 215)
+                        : Color.FromArgb(45, 95, 145);
+                    strokeColor = darkSurface
+                        ? Color.FromArgb(220, 238, 252)
+                        : Color.FromArgb(45, 95, 145);
+                    fillAlpha = 46;   // 18%
+                    strokeAlpha = darkSurface ? 122 : 117;
+                }
+                else
+                {
+                    fillColor = darkSurface
+                        ? Color.FromArgb(110, 155, 200)
+                        : Color.FromArgb(45, 80, 115);
+                    strokeColor = darkSurface
+                        ? Color.FromArgb(210, 230, 248)
+                        : Color.FromArgb(45, 80, 115);
+                    fillAlpha = 20;   // 8%
+                    strokeAlpha = darkSurface ? 61 : 56;
+                }
+            }
+
+            float dpiScale = IsHandleCreated
+                ? Math.Max(1f, GetDpiForWindow(Handle) / 96f)
+                : 1f;
+            float strokeWidth = dpiScale;
+            var visualBounds = new RectangleF(
+                bounds.X + strokeWidth / 2f,
+                bounds.Y + strokeWidth / 2f,
+                Math.Max(0, bounds.Width - strokeWidth),
+                Math.Max(0, bounds.Height - strokeWidth));
+            using (var path = ThemeDrawing.CreateRoundedRectangle(
+                visualBounds,
+                dpiScale))
+            using (var fill = new SolidBrush(
+                ThemeDrawing.WithAlpha(fillColor, fillAlpha)))
+            using (var stroke = new Pen(
+                ThemeDrawing.WithAlpha(strokeColor, strokeAlpha),
+                strokeWidth))
+            {
+                graphics.FillPath(fill, path);
+                graphics.DrawPath(stroke, path);
+            }
+        }
+
+        /// <summary>按当前桌面视觉风格绘制普通、选中或高对比度文字。</summary>
+        private void DrawDesktopIconTextForState(
+            Graphics graphics,
+            string text,
+            RectangleF bounds,
+            StringFormat format,
+            ThemeDefinition theme,
+            bool selected,
+            bool hovered)
+        {
+            if (theme.MenuStyle == ThemeMenuStyle.WindowsXp && selected)
+            {
+                DrawXpSelectedLabel(graphics, text, bounds);
+                return;
+            }
+
+            if (theme.MenuStyle != ThemeMenuStyle.WindowsXp &&
+                SystemInformation.HighContrast &&
+                (selected || hovered))
+            {
+                using (var textBrush = new SolidBrush(SystemColors.HighlightText))
+                    graphics.DrawString(text, iconFont, textBrush, bounds, format);
+                return;
+            }
+
+            DrawDesktopStyleIconText(graphics, text, bounds, format, theme);
+        }
+
+        /// <summary>
+        /// 绘制 XP 经典选中文字：每一行使用紧贴文字宽度的不透明系统高亮色
+        /// 矩形，并以系统高亮文字色绘制，不使用阴影、透明度或圆角。
+        /// </summary>
+        private void DrawXpSelectedLabel(
+            Graphics graphics,
+            string text,
+            RectangleF bounds)
+        {
+            float lineHeight = Math.Max(1f, iconFont.GetHeight(graphics));
+            int maxLines = Math.Max(1, (int)Math.Floor(bounds.Height / lineHeight));
+            List<string> lines = MeasureXpLabelLines(
+                graphics,
+                text,
+                bounds.Width,
+                lineHeight,
+                maxLines);
+            float horizontalPadding = Math.Max(1f, LogicalPixelsToDevice(1));
+
+            using (var background = new SolidBrush(SystemColors.Highlight))
+            using (var foreground = new SolidBrush(SystemColors.HighlightText))
+            using (var lineFormat = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                Trimming = StringTrimming.None,
+                FormatFlags = StringFormatFlags.NoWrap
+            })
+            using (var measureFormat = (StringFormat)StringFormat.GenericTypographic.Clone())
+            {
+                measureFormat.FormatFlags |= StringFormatFlags.MeasureTrailingSpaces;
+                for (int index = 0; index < lines.Count; index++)
+                {
+                    string line = lines[index];
+                    if (line.Length == 0)
+                        continue;
+
+                    float lineWidth = graphics.MeasureString(
+                        line,
+                        iconFont,
+                        new SizeF(bounds.Width, lineHeight + 2f),
+                        measureFormat).Width;
+                    float backgroundWidth = Math.Min(
+                        bounds.Width,
+                        (float)Math.Ceiling(lineWidth) + horizontalPadding * 2f);
+                    float lineY = bounds.Y + index * lineHeight;
+                    graphics.FillRectangle(
+                        background,
+                        bounds.X + (bounds.Width - backgroundWidth) / 2f,
+                        lineY,
+                        backgroundWidth,
+                        (float)Math.Ceiling(lineHeight));
+                    graphics.DrawString(
+                        line,
+                        iconFont,
+                        foreground,
+                        new RectangleF(bounds.X, lineY, bounds.Width, lineHeight + 1f),
+                        lineFormat);
+                }
+            }
+        }
+
+        /// <summary>按标签宽度和可用行数拆分 XP 选中文字，并在截断处添加省略号。</summary>
+        private List<string> MeasureXpLabelLines(
+            Graphics graphics,
+            string text,
+            float maximumWidth,
+            float lineHeight,
+            int maximumLines)
+        {
+            var lines = new List<string>();
+            string remaining = text ?? string.Empty;
+            using (var fitFormat = new StringFormat
+            {
+                Trimming = StringTrimming.None,
+                FormatFlags = StringFormatFlags.LineLimit
+            })
+            {
+                while (remaining.Length > 0 && lines.Count < maximumLines)
+                {
+                    int charactersFitted;
+                    int linesFilled;
+                    graphics.MeasureString(
+                        remaining,
+                        iconFont,
+                        new SizeF(maximumWidth, lineHeight * 1.5f),
+                        fitFormat,
+                        out charactersFitted,
+                        out linesFilled);
+                    if (charactersFitted <= 0)
+                        charactersFitted = 1;
+
+                    charactersFitted = Math.Min(charactersFitted, remaining.Length);
+                    string line = remaining.Substring(0, charactersFitted)
+                        .TrimEnd(' ', '\t', '\r', '\n');
+                    remaining = remaining.Substring(charactersFitted)
+                        .TrimStart(' ', '\t', '\r', '\n');
+                    lines.Add(line);
+                }
+            }
+
+            if (lines.Count == 0)
+                lines.Add(string.Empty);
+            if (remaining.Length > 0)
+            {
+                int lastIndex = lines.Count - 1;
+                lines[lastIndex] = FitXpEllipsis(
+                    graphics,
+                    lines[lastIndex],
+                    maximumWidth,
+                    lineHeight);
+            }
+
+            return lines;
+        }
+
+        /// <summary>缩短 XP 标签末行，确保省略号仍处于标签最大宽度内。</summary>
+        private string FitXpEllipsis(
+            Graphics graphics,
+            string line,
+            float maximumWidth,
+            float lineHeight)
+        {
+            string content = line.TrimEnd();
+            using (var format = (StringFormat)StringFormat.GenericTypographic.Clone())
+            {
+                while (content.Length > 0)
+                {
+                    string candidate = content + "…";
+                    SizeF size = graphics.MeasureString(
+                        candidate,
+                        iconFont,
+                        new SizeF(maximumWidth, lineHeight + 2f),
+                        format);
+                    if (size.Width <= maximumWidth)
+                        return candidate;
+                    content = content.Substring(0, content.Length - 1).TrimEnd();
+                }
+            }
+
+            return "…";
+        }
+
+        /// <summary>
+        /// 以 DPI 自适应的多点采样绘制图标文字。阴影围绕右下偏移中心分布，
+        /// 多层低透明度样本叠加成柔和模糊边缘，避免清晰重影或生硬描边。
+        /// </summary>
+        private void DrawDesktopStyleIconText(
+            Graphics graphics,
+            string text,
+            RectangleF bounds,
+            StringFormat format,
+            ThemeDefinition theme)
+        {
+            float dpiScale = IsHandleCreated
+                ? Math.Max(1f, GetDpiForWindow(Handle) / 96f)
+                : 1f;
+            float dropOffset = 1.1f * dpiScale;
+            float blurRadius = 1.35f * dpiScale;
+            float diagonalRadius = blurRadius * 0.72f;
+            float innerRadius = blurRadius * 0.48f;
+
+            var shadowState = graphics.Save();
+            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            using (var outerShadowBrush = new SolidBrush(
+                ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 20)))
+            using (var innerShadowBrush = new SolidBrush(
+                ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 30)))
+            using (var centerShadowBrush = new SolidBrush(
+                ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 65)))
+            {
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset - blurRadius, dropOffset);
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset + blurRadius, dropOffset);
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset, dropOffset - blurRadius);
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset, dropOffset + blurRadius);
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset - diagonalRadius, dropOffset - diagonalRadius);
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset + diagonalRadius, dropOffset - diagonalRadius);
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset - diagonalRadius, dropOffset + diagonalRadius);
+                DrawTextShadowSample(graphics, text, outerShadowBrush, bounds, format,
+                    dropOffset + diagonalRadius, dropOffset + diagonalRadius);
+
+                DrawTextShadowSample(graphics, text, innerShadowBrush, bounds, format,
+                    dropOffset - innerRadius, dropOffset);
+                DrawTextShadowSample(graphics, text, innerShadowBrush, bounds, format,
+                    dropOffset + innerRadius, dropOffset);
+                DrawTextShadowSample(graphics, text, innerShadowBrush, bounds, format,
+                    dropOffset, dropOffset - innerRadius);
+                DrawTextShadowSample(graphics, text, innerShadowBrush, bounds, format,
+                    dropOffset, dropOffset + innerRadius);
+                DrawTextShadowSample(graphics, text, centerShadowBrush, bounds, format,
+                    dropOffset, dropOffset);
+            }
+            graphics.Restore(shadowState);
+
+            using (var textBrush = new SolidBrush(theme.ItemTextColor))
+                graphics.DrawString(text, iconFont, textBrush, bounds, format);
+        }
+
+        /// <summary>在指定偏移位置绘制一次低透明度文字阴影样本。</summary>
+        private void DrawTextShadowSample(
+            Graphics graphics,
+            string text,
+            Brush brush,
+            RectangleF bounds,
+            StringFormat format,
+            float offsetX,
+            float offsetY)
+        {
+            graphics.DrawString(
+                text,
+                iconFont,
+                brush,
+                new RectangleF(
+                    bounds.X + offsetX,
+                    bounds.Y + offsetY,
+                    bounds.Width,
+                    bounds.Height),
+                format);
         }
 
         /// <summary>绘制图标管理模式右下角的确认、取消按钮和选择数量提示。</summary>
@@ -1542,6 +1826,67 @@ namespace NoFences
             using (var bitmap = icon.ToBitmap())
             {
                 graphics.DrawImage(bitmap, targetRectangle);
+            }
+        }
+
+        /// <summary>按当前桌面风格绘制原色图标或 XP 经典选中染色图标。</summary>
+        private static void DrawDesktopIconForState(
+            Graphics graphics,
+            Icon icon,
+            Rectangle targetRectangle,
+            bool selected,
+            ThemeDefinition theme)
+        {
+            if (selected && theme.MenuStyle == ThemeMenuStyle.WindowsXp)
+            {
+                DrawXpSelectedIcon(graphics, icon, targetRectangle);
+                return;
+            }
+
+            DrawIconHighQuality(graphics, icon, targetRectangle);
+        }
+
+        /// <summary>
+        /// 将 XP 选中图标与系统 Highlight 色按 50% 混合，同时保持源 Alpha，
+        /// 使透明边缘和图标轮廓仍然清晰可辨。
+        /// </summary>
+        private static void DrawXpSelectedIcon(
+            Graphics graphics,
+            Icon icon,
+            Rectangle targetRectangle)
+        {
+            if (icon == null)
+                return;
+
+            Color highlight = SystemColors.Highlight;
+            float red = highlight.R / 255f * 0.5f;
+            float green = highlight.G / 255f * 0.5f;
+            float blue = highlight.B / 255f * 0.5f;
+            var colorMatrix = new ColorMatrix(new[]
+            {
+                new[] { 0.5f, 0f, 0f, 0f, 0f },
+                new[] { 0f, 0.5f, 0f, 0f, 0f },
+                new[] { 0f, 0f, 0.5f, 0f, 0f },
+                new[] { 0f, 0f, 0f, 1f, 0f },
+                new[] { red, green, blue, 0f, 1f }
+            });
+
+            using (var bitmap = icon.ToBitmap())
+            using (var attributes = new ImageAttributes())
+            {
+                attributes.SetColorMatrix(
+                    colorMatrix,
+                    ColorMatrixFlag.Default,
+                    ColorAdjustType.Bitmap);
+                graphics.DrawImage(
+                    bitmap,
+                    targetRectangle,
+                    0,
+                    0,
+                    bitmap.Width,
+                    bitmap.Height,
+                    GraphicsUnit.Pixel,
+                    attributes);
             }
         }
 

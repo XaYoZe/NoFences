@@ -860,26 +860,133 @@ namespace NoFences.Theming
         private void DrawPreviewItem(Graphics graphics, int x, int y, bool selected, string text)
         {
             var itemBounds = new Rectangle(x - 8, y - 5, 78, 70);
-            if (selected)
+            bool xpStyle = theme.MenuStyle == ThemeMenuStyle.WindowsXp;
+            if (selected && !xpStyle)
             {
-                using (var selectedBrush = new SolidBrush(ThemeDrawing.WithAlpha(theme.ItemSelectedColor, 125)))
-                    graphics.FillRectangle(selectedBrush, itemBounds);
-                using (var borderPen = new Pen(ThemeDrawing.WithAlpha(theme.BorderColor, 180)))
-                    graphics.DrawRectangle(borderPen, itemBounds);
+                bool highContrast = SystemInformation.HighContrast;
+                bool darkSurface = ThemeDrawing.IsDark(theme.MainPanelColor);
+                Color fillColor = highContrast
+                    ? SystemColors.Highlight
+                    : darkSurface
+                        ? Color.FromArgb(130, 175, 215)
+                        : Color.FromArgb(45, 95, 145);
+                Color strokeColor = highContrast
+                    ? SystemColors.HighlightText
+                    : darkSurface
+                        ? Color.FromArgb(220, 238, 252)
+                        : Color.FromArgb(45, 95, 145);
+                using (var path = ThemeDrawing.CreateRoundedRectangle(itemBounds, 1f))
+                using (var selectedBrush = new SolidBrush(ThemeDrawing.WithAlpha(
+                    fillColor,
+                    highContrast ? 255 : 46)))
+                using (var borderPen = new Pen(ThemeDrawing.WithAlpha(
+                    strokeColor,
+                    highContrast ? 255 : darkSurface ? 122 : 117)))
+                {
+                    graphics.FillPath(selectedBrush, path);
+                    graphics.DrawPath(borderPen, path);
+                }
             }
 
-            using (var folderBrush = new SolidBrush(theme.AccentColor))
+            Color folderColor = selected && xpStyle
+                ? ThemeDrawing.Mix(theme.AccentColor, SystemColors.Highlight, 0.5f)
+                : theme.AccentColor;
+            using (var folderBrush = new SolidBrush(folderColor))
                 graphics.FillRectangle(folderBrush, x + 10, y, 34, 28);
-            using (var font = CreateThemeFont(8.5f, FontStyle.Regular))
-            using (var shadow = new SolidBrush(ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 150)))
-            using (var foreground = new SolidBrush(theme.ItemTextColor))
+            using (var font = CreatePreviewIconFont(8.5f))
             using (var format = new StringFormat { Alignment = StringAlignment.Center })
             {
                 var textBounds = new RectangleF(x - 5, y + 36, 65, 22);
-                graphics.DrawString(text, font, shadow,
-                    new RectangleF(textBounds.X + 1, textBounds.Y + 1, textBounds.Width, textBounds.Height),
+                if (selected && xpStyle)
+                {
+                    SizeF textSize = graphics.MeasureString(text, font, textBounds.Size, format);
+                    float labelWidth = Math.Min(textBounds.Width, (float)Math.Ceiling(textSize.Width) + 2f);
+                    using (var labelBackground = new SolidBrush(SystemColors.Highlight))
+                    using (var labelText = new SolidBrush(SystemColors.HighlightText))
+                    {
+                        graphics.FillRectangle(
+                            labelBackground,
+                            textBounds.X + (textBounds.Width - labelWidth) / 2f,
+                            textBounds.Y,
+                            labelWidth,
+                            (float)Math.Ceiling(font.GetHeight(graphics)));
+                        graphics.DrawString(text, font, labelText, textBounds, format);
+                    }
+                }
+                else
+                {
+                    Color textColor = selected && SystemInformation.HighContrast
+                        ? SystemColors.HighlightText
+                        : theme.ItemTextColor;
+                    if (!selected || !SystemInformation.HighContrast)
+                        DrawPreviewTextShadow(graphics, text, font, textBounds, format);
+                    using (var foreground = new SolidBrush(textColor))
+                        graphics.DrawString(text, font, foreground, textBounds, format);
+                }
+            }
+        }
+
+        /// <summary>为主题预览创建与真实图标标签相同的常规字重字体。</summary>
+        private Font CreatePreviewIconFont(float size)
+        {
+            try
+            {
+                return new Font(theme.FontFamilyName, size, FontStyle.Regular);
+            }
+            catch
+            {
+                return CreateThemeFont(size, FontStyle.Regular);
+            }
+        }
+
+        /// <summary>使用多点低透明度采样模拟主题预览中的柔和文字阴影。</summary>
+        private void DrawPreviewTextShadow(
+            Graphics graphics,
+            string text,
+            Font font,
+            RectangleF bounds,
+            StringFormat format)
+        {
+            PointF[] offsets =
+            {
+                new PointF(-0.2f, 1.1f),
+                new PointF(2.4f, 1.1f),
+                new PointF(1.1f, -0.2f),
+                new PointF(1.1f, 2.4f),
+                new PointF(0.15f, 0.15f),
+                new PointF(2.05f, 0.15f),
+                new PointF(0.15f, 2.05f),
+                new PointF(2.05f, 2.05f)
+            };
+            using (var outer = new SolidBrush(
+                ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 22)))
+            using (var center = new SolidBrush(
+                ThemeDrawing.WithAlpha(theme.ItemTextShadowColor, 72)))
+            {
+                foreach (PointF offset in offsets)
+                {
+                    graphics.DrawString(
+                        text,
+                        font,
+                        outer,
+                        new RectangleF(
+                            bounds.X + offset.X,
+                            bounds.Y + offset.Y,
+                            bounds.Width,
+                            bounds.Height),
+                        format);
+                }
+
+                graphics.DrawString(
+                    text,
+                    font,
+                    center,
+                    new RectangleF(
+                        bounds.X + 1.1f,
+                        bounds.Y + 1.1f,
+                        bounds.Width,
+                        bounds.Height),
                     format);
-                graphics.DrawString(text, font, foreground, textBounds, format);
             }
         }
 

@@ -95,10 +95,13 @@ namespace NoFences.Theming
             Rectangle imageRectangle = CenterVertically(
                 e.Item,
                 e.ImageRectangle);
-            if (profile.ImageHorizontalOffset != 0)
+            int horizontalOffset = ScaleLogical(
+                e.ToolStrip,
+                profile.ContentHorizontalInset + profile.ImageHorizontalOffset);
+            if (horizontalOffset != 0)
             {
                 imageRectangle.Offset(
-                    ScaleLogical(e.ToolStrip, profile.ImageHorizontalOffset),
+                    horizontalOffset,
                     0);
             }
             var centeredArgs = new ToolStripItemImageRenderEventArgs(
@@ -167,6 +170,9 @@ namespace NoFences.Theming
             int textVerticalOffset = (int)Math.Round(
                 profile.TextVerticalOffset * GetDpiScale(e.ToolStrip),
                 MidpointRounding.AwayFromZero);
+            int contentHorizontalInset = ScaleLogical(
+                e.ToolStrip,
+                profile.ContentHorizontalInset);
 
             // ToolStripDropDownMenu 会先根据系统默认的 22px 左右行高生成文字矩形，
             // ThemeUi 随后再把 Win11 菜单项扩大到 34px。框架不会同步把旧文字矩形
@@ -175,9 +181,9 @@ namespace NoFences.Theming
             // 垂直居中。Profile 中的补偿值继续修正具体字体的可见字形中心；普通
             // 文字、快捷键以及禁用态最终都会经过同一套基线规则。
             e.TextRectangle = new Rectangle(
-                e.TextRectangle.Left,
+                e.TextRectangle.Left + contentHorizontalInset,
                 textVerticalOffset,
-                e.TextRectangle.Width,
+                Math.Max(1, e.TextRectangle.Width - contentHorizontalInset * 2),
                 e.Item.Height);
             e.TextFormat &= ~(TextFormatFlags.Bottom | TextFormatFlags.VerticalCenter);
             e.TextFormat |= TextFormatFlags.VerticalCenter |
@@ -196,7 +202,8 @@ namespace NoFences.Theming
                     TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
                 int right = e.Item.Width -
                     ScaleLogical(e.ToolStrip, profile.ItemHorizontalInset) -
-                    ScaleLogical(e.ToolStrip, profile.ItemPadding.Right);
+                    ScaleLogical(e.ToolStrip, profile.ItemPadding.Right) -
+                    contentHorizontalInset;
                 e.TextRectangle = new Rectangle(
                     Math.Max(e.TextRectangle.Left, right - measured.Width),
                     textVerticalOffset,
@@ -277,7 +284,8 @@ namespace NoFences.Theming
                 color = theme.MenuTextColor;
 
             Point center = new Point(
-                e.ArrowRectangle.Left + e.ArrowRectangle.Width / 2,
+                e.ArrowRectangle.Left + e.ArrowRectangle.Width / 2 -
+                    ScaleLogical(e.Item?.Owner, profile.ContentHorizontalInset),
                 e.ArrowRectangle.Top + e.ArrowRectangle.Height / 2);
 
             if (profile.DrawChevronArrow)
@@ -315,10 +323,13 @@ namespace NoFences.Theming
             Rectangle imageRectangle = CenterVertically(
                 e.Item,
                 e.ImageRectangle);
-            if (profile.ImageHorizontalOffset != 0)
+            int horizontalOffset = ScaleLogical(
+                e.ToolStrip,
+                profile.ContentHorizontalInset + profile.ImageHorizontalOffset);
+            if (horizontalOffset != 0)
             {
                 imageRectangle.Offset(
-                    ScaleLogical(e.ToolStrip, profile.ImageHorizontalOffset),
+                    horizontalOffset,
                     0);
             }
             Rectangle box = CreateCenteredSquare(

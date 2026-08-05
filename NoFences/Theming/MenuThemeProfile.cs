@@ -51,6 +51,12 @@ namespace NoFences.Theming
 
         public Size ImageScalingSize { get; private set; }
 
+        /// <summary>
+        /// 菜单项内容相对容器左右边缘的额外内缩。该值同时作用于图标、文字、
+        /// 勾选、快捷键和子菜单箭头，避免只移动图标后破坏内部对齐关系。
+        /// </summary>
+        public int ContentHorizontalInset { get; private set; }
+
         public int ImageHorizontalOffset { get; private set; }
 
         public bool DrawClassicThreeDimensionalBorder { get; private set; }
@@ -116,6 +122,7 @@ namespace NoFences.Theming
                 MenuPadding = new Padding(2),
                 ItemPadding = new Padding(4, 0, 6, 0),
                 ImageScalingSize = new Size(16, 16),
+                ContentHorizontalInset = 0,
                 ImageHorizontalOffset = 0,
                 DrawClassicThreeDimensionalBorder = true,
                 DrawChevronArrow = false,
@@ -158,13 +165,14 @@ namespace NoFences.Theming
                 SeparatorHeight = 9,
                 ContainerCornerRadius = 8,
                 ItemCornerRadius = 4,
-                ItemHorizontalInset = 4,
+                ItemHorizontalInset = 8,
                 ItemVerticalInset = 2,
                 SeparatorInset = 8,
                 MenuPadding = new Padding(4, 6, 4, 6),
                 ItemPadding = new Padding(8, 0, 12, 0),
                 ImageScalingSize = new Size(16, 16),
-                ImageHorizontalOffset = 4,
+                ContentHorizontalInset = 8,
+                ImageHorizontalOffset = 0,
                 DrawClassicThreeDimensionalBorder = false,
                 DrawChevronArrow = true,
                 DrawEmbossedDisabledText = false,
@@ -208,12 +216,13 @@ namespace NoFences.Theming
                 SeparatorHeight = 7,
                 ContainerCornerRadius = MathMin(theme.CornerRadius, 8),
                 ItemCornerRadius = theme.CornerRadius > 0 ? 4 : 0,
-                ItemHorizontalInset = 2,
+                ItemHorizontalInset = 8,
                 ItemVerticalInset = 1,
-                SeparatorInset = 6,
+                SeparatorInset = 8,
                 MenuPadding = new Padding(2, 3, 2, 3),
                 ItemPadding = new Padding(5, 0, 8, 0),
                 ImageScalingSize = new Size(16, 16),
+                ContentHorizontalInset = 8,
                 ImageHorizontalOffset = 0,
                 DrawClassicThreeDimensionalBorder = false,
                 DrawChevronArrow = false,
