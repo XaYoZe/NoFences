@@ -51,6 +51,8 @@ namespace NoFences.Theming
 
         public Size ImageScalingSize { get; private set; }
 
+        public int ImageHorizontalOffset { get; private set; }
+
         public bool DrawClassicThreeDimensionalBorder { get; private set; }
 
         public bool DrawChevronArrow { get; private set; }
@@ -114,6 +116,7 @@ namespace NoFences.Theming
                 MenuPadding = new Padding(2),
                 ItemPadding = new Padding(4, 0, 6, 0),
                 ImageScalingSize = new Size(16, 16),
+                ImageHorizontalOffset = 0,
                 DrawClassicThreeDimensionalBorder = true,
                 DrawChevronArrow = false,
                 DrawEmbossedDisabledText = true,
@@ -149,8 +152,8 @@ namespace NoFences.Theming
                 Style = ThemeMenuStyle.Windows11,
                 FontFamilyName = "Segoe UI Variable Text",
                 FontSize = 10.5f,
-                TextVerticalOffset = 4,
-                MinimumWidth = 220,
+                TextVerticalOffset = 0,
+                MinimumWidth = 170,
                 ItemHeight = 34,
                 SeparatorHeight = 9,
                 ContainerCornerRadius = 8,
@@ -161,6 +164,7 @@ namespace NoFences.Theming
                 MenuPadding = new Padding(4, 6, 4, 6),
                 ItemPadding = new Padding(8, 0, 12, 0),
                 ImageScalingSize = new Size(16, 16),
+                ImageHorizontalOffset = 4,
                 DrawClassicThreeDimensionalBorder = false,
                 DrawChevronArrow = true,
                 DrawEmbossedDisabledText = false,
@@ -198,7 +202,7 @@ namespace NoFences.Theming
                 Style = ThemeMenuStyle.Standard,
                 FontFamilyName = theme.FontFamilyName,
                 FontSize = 9f,
-                TextVerticalOffset = 2,
+                TextVerticalOffset = 0,
                 MinimumWidth = 170,
                 ItemHeight = 26,
                 SeparatorHeight = 7,
@@ -210,11 +214,16 @@ namespace NoFences.Theming
                 MenuPadding = new Padding(2, 3, 2, 3),
                 ItemPadding = new Padding(5, 0, 8, 0),
                 ImageScalingSize = new Size(16, 16),
+                ImageHorizontalOffset = 0,
                 DrawClassicThreeDimensionalBorder = false,
                 DrawChevronArrow = false,
                 DrawEmbossedDisabledText = false,
                 DropShadowEnabled = true,
-                Opacity = 1d,
+                // ToolStripDropDown 的透明度会连同文字一起生效。默认半透明
+                // 面板使用 0.92，在保留桌面材质感的同时确保菜单文字清晰。
+                Opacity = theme.EnableBlur && theme.MainPanelOpacityPercent < 100
+                    ? 0.92d
+                    : 1d,
                 ImageMarginColor = ThemeDrawing.Mix(
                     theme.MenuBackgroundColor,
                     theme.ControlBackgroundColor,

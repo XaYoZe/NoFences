@@ -80,6 +80,35 @@ namespace NoFences.Theming
                 e.Graphics.FillRectangle(brush, e.AffectedBounds);
         }
 
+        /// <summary>
+        /// 程序菜单项会在布局后按主题改写最终行高，因此重新按最终高度居中
+        /// 图标，避免继续沿用 WinForms 基于系统默认行高生成的 ImageRectangle。
+        /// </summary>
+        protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e)
+        {
+            if (e.Image == null)
+            {
+                base.OnRenderItemImage(e);
+                return;
+            }
+
+            Rectangle imageRectangle = CenterVertically(
+                e.Item,
+                e.ImageRectangle);
+            if (profile.ImageHorizontalOffset != 0)
+            {
+                imageRectangle.Offset(
+                    ScaleLogical(e.ToolStrip, profile.ImageHorizontalOffset),
+                    0);
+            }
+            var centeredArgs = new ToolStripItemImageRenderEventArgs(
+                e.Graphics,
+                e.Item,
+                e.Image,
+                imageRectangle);
+            base.OnRenderItemImage(centeredArgs);
+        }
+
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
             var fullBounds = new Rectangle(Point.Empty, e.Item.Size);
@@ -283,8 +312,17 @@ namespace NoFences.Theming
 
         protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
         {
+            Rectangle imageRectangle = CenterVertically(
+                e.Item,
+                e.ImageRectangle);
+            if (profile.ImageHorizontalOffset != 0)
+            {
+                imageRectangle.Offset(
+                    ScaleLogical(e.ToolStrip, profile.ImageHorizontalOffset),
+                    0);
+            }
             Rectangle box = CreateCenteredSquare(
-                e.ImageRectangle,
+                imageRectangle,
                 ScaleLogical(e.ToolStrip, 14));
             int radius = profile.Style == ThemeMenuStyle.Windows11
                 ? ScaleLogical(e.ToolStrip, 2)
@@ -523,6 +561,21 @@ namespace NoFences.Theming
                 bounds.Top + (bounds.Height - size) / 2,
                 size,
                 size);
+        }
+
+        /// <summary>保持横向槽位不变，仅按菜单项最终行高重新垂直居中矩形。</summary>
+        private static Rectangle CenterVertically(
+            ToolStripItem item,
+            Rectangle bounds)
+        {
+            if (item == null)
+                return bounds;
+
+            return new Rectangle(
+                bounds.X,
+                Math.Max(0, (item.Height - bounds.Height) / 2),
+                bounds.Width,
+                bounds.Height);
         }
 
         private static float GetDpiScale(ToolStrip toolStrip)

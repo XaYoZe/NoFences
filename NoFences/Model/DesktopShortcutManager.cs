@@ -268,7 +268,7 @@ namespace NoFences.Model
 
                 try
                 {
-                    File.Delete(record.OriginalPath);
+                    DeleteFileClearingReadOnly(record.OriginalPath);
                     DesktopUtil.NotifyShellItemDeleted(record.OriginalPath);
                 }
                 catch (Exception ex)
@@ -355,7 +355,7 @@ namespace NoFences.Model
 
                 try
                 {
-                    File.Delete(record.ManagedPath);
+                    DeleteFileClearingReadOnly(record.ManagedPath);
                 }
                 catch (Exception ex)
                 {
@@ -378,8 +378,36 @@ namespace NoFences.Model
             record.State = DesktopShortcutState.MovingToDesktop;
             persist(fenceInfo);
 
-            if (!TryTransferFile(record.ManagedPath, record.OriginalPath, out error))
-                return false;
+            string originalRestoreError;
+            if (!TryTransferFile(
+                record.ManagedPath,
+                record.OriginalPath,
+                out originalRestoreError))
+            {
+                string fallbackPath;
+                string fallbackError = null;
+                if (!TryGetUserDesktopFallbackPath(
+                        record.OriginalPath,
+                        out fallbackPath) ||
+                    !TryTransferFile(
+                        record.ManagedPath,
+                        fallbackPath,
+                        out fallbackError))
+                {
+                    error = originalRestoreError;
+                    if (!string.IsNullOrWhiteSpace(fallbackError))
+                    {
+                        error += Environment.NewLine +
+                            "恢复到当前用户桌面也失败：" + fallbackError;
+                    }
+                    return false;
+                }
+
+                // 公共桌面可能只允许管理员写入。回退成功后把后续启动使用的
+                // 原路径更新为当前用户桌面，避免每次运行重复触发权限失败。
+                record.OriginalPath = fallbackPath;
+                persist(fenceInfo);
+            }
 
             return FinalizeRestored(fenceInfo, record, persist, out error);
         }
@@ -440,7 +468,9 @@ namespace NoFences.Model
                 File.Move(sourcePath, destinationPath);
                 return true;
             }
-            catch (IOException moveException)
+            catch (Exception moveException)
+                when (moveException is IOException ||
+                      moveException is UnauthorizedAccessException)
             {
                 if (File.Exists(destinationPath) && !File.Exists(sourcePath))
                     return true;
@@ -463,7 +493,7 @@ namespace NoFences.Model
                     TryApplyFileMetadata(destinationPath, attributes, creationTime, writeTime);
                     try
                     {
-                        File.Delete(sourcePath);
+                        DeleteFileClearingReadOnly(sourcePath);
                     }
                     catch
                     {
@@ -483,6 +513,74 @@ namespace NoFences.Model
             {
                 error = "无法搬移快捷方式：" + ex.Message;
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// 公共桌面写入受限时返回当前用户桌面的等价恢复路径。
+        /// 仅改变目录并保留原文件名；目标冲突仍交给搬移逻辑拒绝覆盖。
+        /// </summary>
+        private static bool TryGetUserDesktopFallbackPath(
+            string originalPath,
+            out string fallbackPath)
+        {
+            fallbackPath = null;
+            if (string.IsNullOrWhiteSpace(originalPath))
+                return false;
+
+            string originalDirectory = Path.GetDirectoryName(NormalizePath(originalPath));
+            string commonDesktop = Environment.GetFolderPath(
+                Environment.SpecialFolder.CommonDesktopDirectory);
+            if (!PathEquals(originalDirectory, commonDesktop))
+                return false;
+
+            string userDesktop = Environment.GetFolderPath(
+                Environment.SpecialFolder.DesktopDirectory);
+            if (string.IsNullOrWhiteSpace(userDesktop) ||
+                PathEquals(userDesktop, commonDesktop))
+            {
+                return false;
+            }
+
+            fallbackPath = Path.Combine(userDesktop, Path.GetFileName(originalPath));
+            return true;
+        }
+
+        /// <summary>搬移回退失败时尽力恢复源文件原有属性。</summary>
+        private static void TryRestoreSourceAttributes(
+            string sourcePath,
+            FileAttributes attributes)
+        {
+            try
+            {
+                if (File.Exists(sourcePath))
+                    File.SetAttributes(sourcePath, attributes);
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// 删除文件前临时清除只读位；删除失败时恢复原属性并把异常交给调用方处理。
+        /// </summary>
+        private static void DeleteFileClearingReadOnly(string path)
+        {
+            FileAttributes attributes = File.GetAttributes(path);
+            try
+            {
+                if ((attributes & FileAttributes.ReadOnly) != 0)
+                {
+                    File.SetAttributes(
+                        path,
+                        attributes & ~FileAttributes.ReadOnly);
+                }
+                File.Delete(path);
+            }
+            catch
+            {
+                TryRestoreSourceAttributes(path, attributes);
+                throw;
             }
         }
 
@@ -662,7 +760,7 @@ namespace NoFences.Model
             try
             {
                 if (File.Exists(path))
-                    File.Delete(path);
+                    DeleteFileClearingReadOnly(path);
             }
             catch
             {

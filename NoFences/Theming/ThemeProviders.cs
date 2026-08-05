@@ -117,7 +117,7 @@ namespace NoFences.Theming
                 AccentColorArgb = Color.FromArgb(96, 205, 255).ToArgb(),
                 MenuStyle = ThemeMenuStyle.Standard,
 
-                CornerRadius = 0,
+                CornerRadius = 12,
                 EnableBlur = true,
                 BackgroundImageLayout = ThemeImageLayout.Fill,
                 BackgroundImageOpacityPercent = 35

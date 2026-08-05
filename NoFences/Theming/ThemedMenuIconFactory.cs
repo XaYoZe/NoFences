@@ -10,6 +10,7 @@ namespace NoFences.Theming
     /// </summary>
     internal enum ThemedMenuIcon
     {
+        ManageIcons,
         Delete,
         Lock,
         Minify,
@@ -61,6 +62,15 @@ namespace NoFences.Theming
 
                 switch (icon)
                 {
+                    case ThemedMenuIcon.ManageIcons:
+                        graphics.DrawRectangle(pen, 2.5f, 2.5f, 4, 4);
+                        graphics.DrawRectangle(pen, 9.5f, 2.5f, 4, 4);
+                        graphics.DrawRectangle(pen, 2.5f, 9.5f, 4, 4);
+                        graphics.DrawLines(pen, new[]
+                        {
+                            new PointF(9, 11), new PointF(10.5f, 12.5f), new PointF(14, 8.5f)
+                        });
+                        break;
                     case ThemedMenuIcon.Delete:
                         graphics.DrawLine(pen, 4, 4, 12, 4);
                         graphics.DrawLine(pen, 6, 2.5f, 10, 2.5f);
@@ -134,6 +144,22 @@ namespace NoFences.Theming
             {
                 switch (icon)
                 {
+                    case ThemedMenuIcon.ManageIcons:
+                        using (var fill = new SolidBrush(Color.FromArgb(115, 169, 235)))
+                        using (var check = new Pen(Color.FromArgb(20, 145, 45), 2f))
+                        {
+                            graphics.FillRectangle(fill, 2, 2, 5, 5);
+                            graphics.FillRectangle(fill, 9, 2, 5, 5);
+                            graphics.FillRectangle(fill, 2, 9, 5, 5);
+                            graphics.DrawRectangle(outline, 2, 2, 5, 5);
+                            graphics.DrawRectangle(outline, 9, 2, 5, 5);
+                            graphics.DrawRectangle(outline, 2, 9, 5, 5);
+                            graphics.DrawLines(check, new[]
+                            {
+                                new Point(9, 11), new Point(11, 13), new Point(15, 8)
+                            });
+                        }
+                        break;
                     case ThemedMenuIcon.Delete:
                         using (var fill = new SolidBrush(Color.FromArgb(220, 74, 62)))
                         {

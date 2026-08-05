@@ -42,6 +42,15 @@ namespace NoFences
         private bool isMinified;
         private int prevHeight;
 
+        // 图标管理模式使用独立多选集合，不改变普通模式的单选与文字展开规则。
+        private bool isIconManagementMode;
+        private readonly HashSet<string> iconManagementSelection =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Rectangle> entryHitBounds =
+            new Dictionary<string, Rectangle>(StringComparer.OrdinalIgnoreCase);
+        private Rectangle iconManagementConfirmBounds;
+        private Rectangle iconManagementCancelBounds;
+
         private int scrollHeight;
         private int scrollOffset;
 
@@ -305,6 +314,7 @@ namespace NoFences
 
             // 先初始化组件以创建窗口句柄（后续 DPI 相关操作需要 Handle）
             InitializeComponent();
+            iconManagementToolStripMenuItem.Text = ThemeText.IconManagement;
             themeToolStripMenuItem.Text = ThemeText.ThemeMenu;
             darkModeToolStripMenuItem.Text = ThemeText.DarkMode;
             darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
@@ -390,6 +400,7 @@ namespace NoFences
         private void ApplyContextMenuIcons()
         {
             ClearContextMenuIcons();
+            SetContextMenuIcon(iconManagementToolStripMenuItem, ThemedMenuIcon.ManageIcons);
             SetContextMenuIcon(deleteItemToolStripMenuItem, ThemedMenuIcon.Delete);
             SetContextMenuIcon(renameToolStripMenuItem, ThemedMenuIcon.Rename);
             SetContextMenuIcon(titleSizeToolStripMenuItem, ThemedMenuIcon.TitleHeight);
@@ -412,6 +423,7 @@ namespace NoFences
         /// <summary>解除菜单项引用并释放本窗口生成的所有主题图标。</summary>
         private void ClearContextMenuIcons()
         {
+            iconManagementToolStripMenuItem.Image = null;
             deleteItemToolStripMenuItem.Image = null;
             lockedToolStripMenuItem.Image = null;
             minifyToolStripMenuItem.Image = null;
@@ -642,6 +654,9 @@ namespace NoFences
         private void deleteItemToolStripMenuItem_Click(object sender, EventArgs e)
         {
             string item = hoveringItem;
+            if (string.IsNullOrWhiteSpace(item))
+                return;
+
             string error;
             if (FenceManager.Instance.TryRemoveEntry(fenceInfo, item, out error))
             {
@@ -661,6 +676,106 @@ namespace NoFences
             }
         }
 
+        /// <summary>从应用右键菜单进入图标多选管理模式。</summary>
+        private void iconManagementToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (isMinified)
+            {
+                isMinified = false;
+                Height = prevHeight;
+            }
+
+            isIconManagementMode = true;
+            iconManagementSelection.Clear();
+            selectedItem = null;
+            hoveringItem = null;
+            Refresh();
+        }
+
+        /// <summary>退出图标管理模式，并清理所有仅用于本次操作的选择状态。</summary>
+        private void CancelIconManagement()
+        {
+            isIconManagementMode = false;
+            iconManagementSelection.Clear();
+            iconManagementConfirmBounds = Rectangle.Empty;
+            iconManagementCancelBounds = Rectangle.Empty;
+            hoveringItem = null;
+            Refresh();
+        }
+
+        /// <summary>
+        /// 确认移除当前多选条目。普通条目仅解除栅栏引用；受托管的桌面快捷方式
+        /// 会先恢复文件及桌面坐标。失败条目保持选中，便于用户修复后重试。
+        /// </summary>
+        private void ConfirmIconManagement()
+        {
+            if (iconManagementSelection.Count == 0)
+                return;
+
+            var errors = new List<string>();
+            var selectedPaths = new List<string>(iconManagementSelection);
+            foreach (string path in selectedPaths)
+            {
+                string error;
+                if (FenceManager.Instance.TryRemoveEntry(fenceInfo, path, out error))
+                {
+                    iconManagementSelection.Remove(path);
+                    if (selectedItem == path)
+                        selectedItem = null;
+                }
+                else
+                {
+                    errors.Add(Path.GetFileName(path) + "：" + error);
+                }
+            }
+
+            if (errors.Count == 0)
+            {
+                CancelIconManagement();
+                return;
+            }
+
+            Refresh();
+            MessageBox.Show(
+                this,
+                ThemeText.RemoveItemsFailed + Environment.NewLine + Environment.NewLine +
+                string.Join(Environment.NewLine, errors),
+                ThemeText.RemoveItemsTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+
+        /// <summary>处理图标管理模式中的底部按钮和条目多选点击。</summary>
+        private void HandleIconManagementClick(Point location)
+        {
+            if (iconManagementCancelBounds.Contains(location))
+            {
+                CancelIconManagement();
+                return;
+            }
+
+            if (iconManagementConfirmBounds.Contains(location))
+            {
+                ConfirmIconManagement();
+                return;
+            }
+
+            int footerTop = Height - GetIconManagementFooterHeight();
+            if (location.Y < titleHeight || location.Y >= footerTop)
+                return;
+
+            foreach (KeyValuePair<string, Rectangle> item in entryHitBounds)
+            {
+                if (!item.Value.Contains(location))
+                    continue;
+
+                if (!iconManagementSelection.Add(item.Key))
+                    iconManagementSelection.Remove(item.Key);
+                Refresh();
+                return;
+            }
+        }
+
         /// <summary>
         /// 在应用自有右键菜单打开前更新动态菜单项，并在最终布局完成后重新应用
         /// 当前主题。该菜单由空白处右键或条目上的 Shift+右键触发。
@@ -668,6 +783,7 @@ namespace NoFences
         private void contextMenuStrip1_Opening(object sender, System.ComponentModel.CancelEventArgs e)
         {
             deleteItemToolStripMenuItem.Visible = hoveringItem != null;
+            iconManagementToolStripMenuItem.Enabled = !isIconManagementMode;
             darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
             // 可见性和勾选状态会触发 ToolStrip 重新布局；在这些状态更新后应用
             // 主题，确保空白处右键弹出的整个菜单窗口都按当前主题重新绘制。
@@ -677,7 +793,9 @@ namespace NoFences
         /// <summary>拖放进入：仅接受文件拖放（锁定状态下拒绝）。</summary>
         private void FenceWindow_DragEnter(object sender, DragEventArgs e)
         {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop) && !lockedToolStripMenuItem.Checked)
+            if (e.Data.GetDataPresent(DataFormats.FileDrop) &&
+                !lockedToolStripMenuItem.Checked &&
+                !isIconManagementMode)
                 e.Effect = DragDropEffects.Move;
         }
 
@@ -687,6 +805,9 @@ namespace NoFences
         /// </summary>
         private void FenceWindow_DragDrop(object sender, DragEventArgs e)
         {
+            if (isIconManagementMode)
+                return;
+
             var dropped = (string[])e.Data.GetData(DataFormats.FileDrop);
             var errors = new List<string>();
             foreach (var file in dropped)
@@ -755,7 +876,7 @@ namespace NoFences
         /// </summary>
         private void Minify()
         {
-            if (minifyToolStripMenuItem.Checked && !isMinified)
+            if (!isIconManagementMode && minifyToolStripMenuItem.Checked && !isMinified)
             {
                 isMinified = true;
                 prevHeight = Height;
@@ -778,6 +899,9 @@ namespace NoFences
         /// <summary>单击：设置选中更新标志，由 Paint 周期实际处理。</summary>
         private void FenceWindow_Click(object sender, EventArgs e)
         {
+            if (isIconManagementMode)
+                return;
+
             shouldUpdateSelection = true;
             Refresh();
         }
@@ -785,6 +909,9 @@ namespace NoFences
         /// <summary>双击：设置双击执行标志，由 Paint 周期实际处理。</summary>
         private void FenceWindow_DoubleClick(object sender, EventArgs e)
         {
+            if (isIconManagementMode)
+                return;
+
             shouldRunDoubleClick = true;
             Refresh();
         }
@@ -850,9 +977,21 @@ namespace NoFences
             var x = itemPadding;
             var y = itemPadding;
             scrollHeight = 0;
+            entryHitBounds.Clear();
+            int managementFooterHeight = isIconManagementMode
+                ? GetIconManagementFooterHeight()
+                : 0;
+            int contentViewportHeight = Math.Max(
+                0,
+                Height - titleHeight - managementFooterHeight);
+            var contentViewport = new Rectangle(
+                0,
+                titleHeight,
+                Width,
+                contentViewportHeight);
             var contentState = e.Graphics.Save();
             e.Graphics.SetClip(
-                new Rectangle(0, titleHeight, Width, Math.Max(0, Height - titleHeight)),
+                contentViewport,
                 System.Drawing.Drawing2D.CombineMode.Intersect);
             // 记录选中条目（仅当文字超过标准 2 行高度时才需要展开渲染）
             string expandEntryName = null;
@@ -865,7 +1004,7 @@ namespace NoFences
                 if (entry == null)
                     continue;
 
-                bool isSelected = entry.Path == selectedItem;
+                bool isSelected = !isIconManagementMode && entry.Path == selectedItem;
                 bool needsExpand = false;
 
                 if (isSelected)
@@ -877,7 +1016,13 @@ namespace NoFences
                     needsExpand = testSize.Height > textHeight;
                 }
 
-                RenderEntry(e.Graphics, entry, x, y + titleHeight - scrollOffset, skipText: needsExpand);
+                Rectangle entryBounds = RenderEntry(
+                    e.Graphics,
+                    entry,
+                    x,
+                    y + titleHeight - scrollOffset,
+                    skipText: needsExpand);
+                entryHitBounds[entry.Path] = entryBounds;
 
                 if (needsExpand)
                 {
@@ -897,6 +1042,12 @@ namespace NoFences
                     x = itemPadding;
                     y += itemHeight + itemPadding;
                 }
+            }
+
+            if (isIconManagementMode)
+            {
+                iconManagementSelection.RemoveWhere(path =>
+                    !entryHitBounds.ContainsKey(path));
             }
 
             // 选中条目文字展开渲染：仅当文字超过标准 2 行高度时才进入此分支，高度不限，渲染在最顶层
@@ -977,13 +1128,13 @@ namespace NoFences
             }
 
             // 计算内容溢出高度（用于滚动条），确保不会出现负值
-            scrollHeight = Math.Max(0, scrollHeight - (ClientRectangle.Height - titleHeight));
+            scrollHeight = Math.Max(0, scrollHeight - contentViewportHeight);
             scrollOffset = Math.Min(scrollOffset, scrollHeight);
 
             // 滚动条：仅在内容溢出时绘制
             if (scrollHeight > 0)
             {
-                int contentHeight = Math.Max(1, Height - titleHeight);
+                int contentHeight = Math.Max(1, contentViewportHeight);
                 int totalContentHeight = contentHeight + scrollHeight;
                 int proportionalHeight = (int)Math.Round(
                     contentHeight * (contentHeight / (double)totalContentHeight));
@@ -1006,6 +1157,9 @@ namespace NoFences
 
             //  单击/双击处理标志重置（这些标志在 Paint 周期中执行实际操作）
             e.Graphics.Restore(contentState);
+
+            if (isIconManagementMode)
+                DrawIconManagementFooter(e.Graphics, theme, managementFooterHeight);
 
             // Draw a themed outline using the same radius as the actual window region.
             float borderRadius = theme.CornerRadius > 0
@@ -1040,7 +1194,7 @@ namespace NoFences
         /// 渲染单个栅栏条目（图标 + 文字 + 选中/悬停高亮背景）。
         /// 当 skipText 为 true 时跳过文字绘制（选中条目文字将在循环后单独渲染到最顶层，保证 z-order）。
         /// </summary>
-        private void RenderEntry(Graphics g, FenceEntry entry, int x, int y, bool skipText = false)
+        private Rectangle RenderEntry(Graphics g, FenceEntry entry, int x, int y, bool skipText = false)
         {
             var theme = currentTheme ?? ThemePresets.CreateDefault();
             var icon = entry.ExtractIcon(thumbnailProvider);
@@ -1073,7 +1227,7 @@ namespace NoFences
             }
 
             // 单击选中（由 Paint 周期统一处理以保证命中测试一致性）
-            if (mouseOver && shouldUpdateSelection)
+            if (!isIconManagementMode && mouseOver && shouldUpdateSelection)
             {
                 selectedItem = entry.Path;
                 shouldUpdateSelection = false;
@@ -1081,14 +1235,16 @@ namespace NoFences
             }
 
             // 双击打开（由 Paint 周期统一处理以保证命中测试一致性）
-            if (mouseOver && shouldRunDoubleClick)
+            if (!isIconManagementMode && mouseOver && shouldRunDoubleClick)
             {
                 shouldRunDoubleClick = false;
                 entry.Open();
             }
 
             // 绘制选中/悬停背景
-            bool selected = selectedItem == entry.Path;
+            bool selected = isIconManagementMode
+                ? iconManagementSelection.Contains(entry.Path)
+                : selectedItem == entry.Path;
             if (!skipText && (selected || mouseOver))
             {
                 Color stateColor;
@@ -1126,10 +1282,12 @@ namespace NoFences
             // 绘制图标（居中缩放至 iconSize × iconSize）
             var iconRect = new Rectangle(x + itemWidth / 2 - iconSize / 2, y, iconSize, iconSize);
             DrawIconHighQuality(g, icon, iconRect);
+            if (isIconManagementMode)
+                DrawIconManagementCheck(g, iconRect, selected, theme);
 
             // 选中条目跳过文字绘制（将在循环后单独渲染到最顶层以保证 z-order 正确）
             if (skipText)
-                return;
+                return outlineRect;
 
             // 绘制文字（先画阴影偏移，再画白色前景）
             using (var shadowBrush = new SolidBrush(
@@ -1148,6 +1306,227 @@ namespace NoFences
                     textBrush,
                     new RectangleF(textPosition, textMaxSize),
                     stringFormat);
+            }
+
+            return outlineRect;
+        }
+
+        /// <summary>绘制图标管理模式右下角的确认、取消按钮和选择数量提示。</summary>
+        private void DrawIconManagementFooter(
+            Graphics graphics,
+            ThemeDefinition theme,
+            int footerHeight)
+        {
+            if (footerHeight <= 0)
+                return;
+
+            int footerTop = Math.Max(titleHeight, Height - footerHeight);
+            var footerBounds = new Rectangle(0, footerTop, Width, Height - footerTop);
+            using (var footerBrush = new SolidBrush(
+                ThemeDrawing.WithAlpha(theme.TitleBarColor, 220)))
+            using (var separatorPen = new Pen(
+                ThemeDrawing.WithAlpha(theme.BorderColor, 145)))
+            {
+                graphics.FillRectangle(footerBrush, footerBounds);
+                graphics.DrawLine(separatorPen, 0, footerTop, Width, footerTop);
+            }
+
+            int margin = LogicalPixelsToDevice(7);
+            int gap = LogicalPixelsToDevice(5);
+            int buttonHeight = Math.Min(
+                LogicalPixelsToDevice(30),
+                Math.Max(1, footerBounds.Height - margin * 2));
+            int availableWidth = Math.Max(2, Width - margin * 2 - gap);
+            int cancelWidth = Math.Max(
+                1,
+                Math.Min(LogicalPixelsToDevice(68), availableWidth / 2));
+            int confirmWidth = Math.Max(
+                1,
+                Math.Min(
+                    LogicalPixelsToDevice(88),
+                    availableWidth - cancelWidth));
+            int buttonTop = footerTop + (footerBounds.Height - buttonHeight) / 2;
+
+            iconManagementCancelBounds = new Rectangle(
+                Math.Max(0, Width - margin - cancelWidth),
+                buttonTop,
+                cancelWidth,
+                buttonHeight);
+            iconManagementConfirmBounds = new Rectangle(
+                Math.Max(0, iconManagementCancelBounds.Left - gap - confirmWidth),
+                buttonTop,
+                confirmWidth,
+                buttonHeight);
+
+            Point mouse = PointToClient(MousePosition);
+            bool canConfirm = iconManagementSelection.Count > 0;
+            DrawIconManagementButton(
+                graphics,
+                iconManagementConfirmBounds,
+                ThemeText.Confirm,
+                canConfirm,
+                iconManagementConfirmBounds.Contains(mouse),
+                true,
+                theme);
+            DrawIconManagementButton(
+                graphics,
+                iconManagementCancelBounds,
+                ThemeText.Cancel,
+                true,
+                iconManagementCancelBounds.Contains(mouse),
+                false,
+                theme);
+
+            int hintRight = iconManagementConfirmBounds.Left - margin;
+            if (hintRight > margin)
+            {
+                string hint = iconManagementSelection.Count > 0
+                    ? ThemeText.SelectedItemCount(iconManagementSelection.Count)
+                    : ThemeText.IconManagementHint;
+                var hintBounds = new Rectangle(
+                    margin,
+                    footerTop,
+                    hintRight - margin,
+                    footerBounds.Height);
+                TextRenderer.DrawText(
+                    graphics,
+                    hint,
+                    iconFont ?? Font,
+                    hintBounds,
+                    theme.ItemTextColor,
+                    TextFormatFlags.Left |
+                    TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.SingleLine |
+                    TextFormatFlags.EndEllipsis |
+                    TextFormatFlags.NoPadding);
+            }
+        }
+
+        /// <summary>返回当前 DPI 下图标管理底栏的设备像素高度。</summary>
+        private int GetIconManagementFooterHeight()
+        {
+            return LogicalPixelsToDevice(46);
+        }
+
+        /// <summary>按当前主题绘制图标管理底栏中的单个操作按钮。</summary>
+        private void DrawIconManagementButton(
+            Graphics graphics,
+            Rectangle bounds,
+            string text,
+            bool enabled,
+            bool hovered,
+            bool accent,
+            ThemeDefinition theme)
+        {
+            Color fillColor;
+            if (!enabled)
+            {
+                fillColor = ThemeDrawing.Mix(
+                    theme.MainPanelColor,
+                    theme.ControlBackgroundColor,
+                    0.22f);
+            }
+            else if (accent)
+            {
+                fillColor = theme.AccentColor;
+            }
+            else
+            {
+                fillColor = ThemeDrawing.Mix(
+                    theme.MainPanelColor,
+                    theme.ControlBackgroundColor,
+                    0.45f);
+            }
+
+            if (hovered && enabled)
+            {
+                fillColor = ThemeDrawing.Mix(
+                    fillColor,
+                    ThemeDrawing.IsDark(fillColor) ? Color.White : Color.Black,
+                    0.12f);
+            }
+
+            int radius = theme.CornerRadius > 0
+                ? LogicalPixelsToDevice(Math.Min(8, theme.CornerRadius))
+                : 0;
+            using (var path = ThemeDrawing.CreateRoundedRectangle(bounds, radius))
+            using (var brush = new SolidBrush(
+                ThemeDrawing.WithAlpha(fillColor, enabled ? 230 : 120)))
+            using (var pen = new Pen(
+                ThemeDrawing.WithAlpha(theme.BorderColor, enabled ? 190 : 90)))
+            {
+                graphics.FillPath(brush, path);
+                graphics.DrawPath(pen, path);
+            }
+
+            Color textColor = !enabled
+                ? ThemeDrawing.WithAlpha(theme.ItemTextColor, 105)
+                : accent
+                    ? (ThemeDrawing.IsDark(fillColor) ? Color.White : Color.Black)
+                    : theme.ItemTextColor;
+            TextRenderer.DrawText(
+                graphics,
+                text,
+                iconFont ?? Font,
+                bounds,
+                textColor,
+                TextFormatFlags.HorizontalCenter |
+                TextFormatFlags.VerticalCenter |
+                TextFormatFlags.SingleLine |
+                TextFormatFlags.EndEllipsis |
+                TextFormatFlags.NoPadding);
+        }
+
+        /// <summary>在管理模式下为每个图标绘制可多选的圆形勾选标记。</summary>
+        private void DrawIconManagementCheck(
+            Graphics graphics,
+            Rectangle iconBounds,
+            bool selected,
+            ThemeDefinition theme)
+        {
+            int size = Math.Max(LogicalPixelsToDevice(14), iconSize / 3);
+            var checkBounds = new Rectangle(
+                iconBounds.Right - size + LogicalPixelsToDevice(2),
+                iconBounds.Top - LogicalPixelsToDevice(2),
+                size,
+                size);
+            Color fillColor = selected
+                ? theme.AccentColor
+                : ThemeDrawing.WithAlpha(theme.MainPanelColor, 205);
+            using (var fill = new SolidBrush(fillColor))
+            using (var outline = new Pen(
+                selected ? theme.AccentColor : theme.BorderColor,
+                Math.Max(1f, LogicalPixelsToDevice(1))))
+            {
+                graphics.FillEllipse(fill, checkBounds);
+                graphics.DrawEllipse(outline, checkBounds);
+            }
+
+            if (!selected)
+                return;
+
+            Color checkColor = ThemeDrawing.IsDark(theme.AccentColor)
+                ? Color.White
+                : Color.Black;
+            using (var pen = new Pen(
+                checkColor,
+                Math.Max(1.5f, LogicalPixelsToDevice(1))))
+            {
+                pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                graphics.DrawLines(pen, new[]
+                {
+                    new Point(
+                        checkBounds.Left + checkBounds.Width / 4,
+                        checkBounds.Top + checkBounds.Height / 2),
+                    new Point(
+                        checkBounds.Left + checkBounds.Width / 2 - 1,
+                        checkBounds.Bottom - checkBounds.Height / 4),
+                    new Point(
+                        checkBounds.Right - checkBounds.Width / 5,
+                        checkBounds.Top + checkBounds.Height / 4)
+                });
             }
         }
 
@@ -1278,26 +1657,30 @@ namespace NoFences
 
         /// <summary>
         /// 鼠标右键点击处理。
-        /// - 右键悬停条目：显示 Shell 上下文菜单
-        /// - 托管快捷方式、Shift+右键或右键空白区域：显示应用自身的上下文菜单
-        /// 托管快捷方式不开放 Shell 删除/重命名，避免绕过桌面恢复事务。
+        /// - 右键悬停任意条目：显示原生 Shell 上下文菜单
+        /// - Shift+右键或右键空白区域：显示应用自身的上下文菜单
+        /// 图标管理模式只响应左键多选及底栏按钮，避免误触打开或右键命令。
         /// </summary>
         private void FenceWindow_MouseClick(object sender, MouseEventArgs e)
         {
+            if (isIconManagementMode)
+            {
+                if (e.Button == MouseButtons.Left)
+                    HandleIconManagementClick(e.Location);
+                return;
+            }
+
             if (e.Button != MouseButtons.Right)
                 return;
 
-            bool isManagedDesktopEntry = hoveringItem != null &&
-                FenceManager.Instance.IsManagedDesktopEntry(fenceInfo, hoveringItem);
-            if (hoveringItem != null && !isManagedDesktopEntry &&
-                !ModifierKeys.HasFlag(Keys.Shift))
+            if (hoveringItem != null && !ModifierKeys.HasFlag(Keys.Shift))
             {
                 // 右键条目 → Windows Shell 右键菜单
                 shellContextMenu.ShowContextMenu(new[] { new FileInfo(hoveringItem) }, MousePosition);
             }
             else
             {
-                // 托管快捷方式、Shift+右键或空白处 → 应用菜单
+                // Shift+右键或空白处 → 应用菜单
                 appContextMenu.Show(this, e.Location);
             }
         }

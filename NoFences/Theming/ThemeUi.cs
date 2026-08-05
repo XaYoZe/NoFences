@@ -172,6 +172,11 @@ namespace NoFences.Theming
                     var dropDown = (ToolStripDropDown)strip;
                     dropDown.DropShadowEnabled = profile.DropShadowEnabled;
                     dropDown.Opacity = profile.Opacity;
+                    BlurUtil.SetBlur(
+                        dropDown.Handle,
+                        profile.Style == ThemeMenuStyle.Standard &&
+                        theme.EnableBlur &&
+                        profile.Opacity < 1d);
 
                     var dropDownMenu = strip as ToolStripDropDownMenu;
                     if (dropDownMenu != null)
@@ -198,7 +203,29 @@ namespace NoFences.Theming
             }
 
             strip.PerformLayout();
+            if (isDropDown)
+                EqualizeDropDownHorizontalMargins(strip);
             strip.Invalidate();
+        }
+
+        /// <summary>
+        /// 让下拉菜单中每个项目的右边距与其布局后的左边距一致。WinForms 的
+        /// ToolStripDropDownMenu 会把水平 Padding 计入容器宽度，却不会始终把
+        /// 同等空间放到项目左侧；固定项目宽度后，多余空间会因此全部留在右边。
+        /// </summary>
+        private static void EqualizeDropDownHorizontalMargins(ToolStrip strip)
+        {
+            int clientWidth = strip.ClientSize.Width;
+            if (clientWidth <= 0)
+                return;
+
+            foreach (ToolStripItem item in strip.Items)
+            {
+                int left = Math.Max(0, item.Bounds.Left);
+                int width = Math.Max(1, clientWidth - left * 2);
+                item.AutoSize = false;
+                item.Size = new Size(width, item.Height);
+            }
         }
 
         /// <summary>

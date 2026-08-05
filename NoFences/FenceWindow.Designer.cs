@@ -31,6 +31,7 @@
             this.components = new System.ComponentModel.Container();
             System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(FenceWindow));
             this.appContextMenu = new System.Windows.Forms.ContextMenuStrip(this.components);
+            this.iconManagementToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.deleteItemToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.lockedToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.minifyToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
@@ -50,6 +51,7 @@
             // 
             resources.ApplyResources(this.appContextMenu, "appContextMenu");
             this.appContextMenu.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.iconManagementToolStripMenuItem,
             this.deleteItemToolStripMenuItem,
             this.lockedToolStripMenuItem,
             this.minifyToolStripMenuItem,
@@ -66,6 +68,12 @@
             this.appContextMenu.RenderMode = System.Windows.Forms.ToolStripRenderMode.Professional;
             this.appContextMenu.Opening += new System.ComponentModel.CancelEventHandler(this.contextMenuStrip1_Opening);
             // 
+            // iconManagementToolStripMenuItem
+            //
+            this.iconManagementToolStripMenuItem.Name = "iconManagementToolStripMenuItem";
+            this.iconManagementToolStripMenuItem.Text = "Manage icons...";
+            this.iconManagementToolStripMenuItem.Click += new System.EventHandler(this.iconManagementToolStripMenuItem_Click);
+            //
             // deleteItemToolStripMenuItem
             // 
             resources.ApplyResources(this.deleteItemToolStripMenuItem, "deleteItemToolStripMenuItem");
@@ -172,6 +180,7 @@
         #endregion
 
         private System.Windows.Forms.ContextMenuStrip appContextMenu;
+        private System.Windows.Forms.ToolStripMenuItem iconManagementToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem lockedToolStripMenuItem;
         private System.Windows.Forms.ToolStripSeparator toolStripSeparator1;
         private System.Windows.Forms.ToolStripSeparator toolStripSeparator2;
