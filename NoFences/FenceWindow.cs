@@ -70,6 +70,10 @@ namespace NoFences
         private ThemeDefinition currentTheme;
         private Image backgroundImage;
         private readonly List<Image> themedMenuImages = new List<Image>();
+        // Windows 11 顶层窗口的系统圆角为 8 个逻辑像素；由 DWM 同时裁剪
+        // Acrylic 合成表面和窗口内容，避免 Form.Region 之外残留矩形模糊层。
+        private const int NativeWindowCornerRadius = 8;
+        private bool usesNativeWindowCorners;
 
         /// <summary>
         /// 将设备像素（物理像素）转换为逻辑像素（96 DPI 坐标）。
@@ -321,8 +325,8 @@ namespace NoFences
             darkModeToolStripMenuItem.Text = ThemeText.DarkMode;
             darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
 
-            // 应用 Windows 视觉效果
-            DropShadow.ApplyShadows(this);      // DWM 原生窗口阴影
+            // 应用 Windows 视觉效果。DWM 投影需等主题圆角确定后再设置，
+            // 否则矩形投影会残留在圆角外侧并在拖动时形成不透明角块。
             WindowUtil.HideFromAltTab(Handle);  // 从 Alt+Tab 隐藏
             DesktopUtil.GlueToDesktop(Handle);  // 粘附到桌面 Progman 窗口
 
@@ -388,10 +392,14 @@ namespace NoFences
             ApplyContextMenuIcons();
             ThemeUi.ApplyToContextMenu(appContextMenu, currentTheme);
             darkModeToolStripMenuItem.Checked = ThemeManager.Instance.DarkModeEnabled;
-            BlurUtil.SetBlur(Handle, currentTheme.EnableBlur);
             ReloadBackgroundImage();
             ReloadFonts();
+            // 先确定由 DWM 原生圆角还是 WinForms Region 负责裁剪，再启用
+            // 模糊合成。旧系统无法裁剪 Acrylic 时关闭模糊，避免矩形灰角。
             UpdateRoundedRegion();
+            bool canEnableBlur = currentTheme.EnableBlur &&
+                (currentTheme.CornerRadius <= 0 || usesNativeWindowCorners);
+            BlurUtil.SetBlur(Handle, canEnableBlur);
             Invalidate(true);
         }
 
@@ -466,28 +474,66 @@ namespace NoFences
         }
 
         /// <summary>
-        /// Form.Region 同时决定绘制轮廓与鼠标命中区域。圆角按当前 DPI 缩放，
-        /// 从而在不同显示器上保持相同的视觉尺寸。
+        /// Windows 11 的模糊主题使用 DWM 原生圆角，使 Acrylic 合成表面、窗口
+        /// 内容和拖动快照由同一轮廓裁剪。无原生支持时才回退 Form.Region；
+        /// Region 圆角按当前 DPI 缩放，从而在不同显示器上保持一致。
         /// </summary>
         private void UpdateRoundedRegion()
         {
+            bool hasRoundedCorners = currentTheme != null &&
+                currentTheme.CornerRadius > 0 &&
+                Width > 1 && Height > 1;
+
+            // DWM 原生圆角会自动跟随窗口尺寸和 DPI，拖动缩放时无需重复
+            // 设置窗口属性。直接返回可让 WM_SIZE 尽快进入整窗重绘。
+            if (usesNativeWindowCorners && hasRoundedCorners &&
+                currentTheme.EnableBlur)
+            {
+                return;
+            }
+
+            // 官方 DWM 圆角策略不适用于设置了 Window Region 的窗口，因此先
+            // 清除旧 Region，再请求原生圆角。Region 对象仍由本窗口负责释放。
             Region oldRegion = Region;
-            if (currentTheme == null || currentTheme.CornerRadius <= 0 ||
-                Width <= 1 || Height <= 1)
-            {
-                Region = null;
-            }
-            else
-            {
-                int radius = LogicalPixelsToDevice(currentTheme.CornerRadius);
-                using (var path = ThemeDrawing.CreateRoundedRectangle(
-                    new RectangleF(0, 0, Width, Height),
-                    radius))
-                {
-                    Region = new Region(path);
-                }
-            }
+            Region = null;
             oldRegion?.Dispose();
+            usesNativeWindowCorners = false;
+
+            if (hasRoundedCorners && currentTheme.EnableBlur)
+            {
+                // 原生圆角需要启用 DWM 非工作区合成；由 DWM 生成的投影也会
+                // 随同系统圆角正确裁剪，不再出现矩形角块。
+                DropShadow.SetShadow(this, true);
+                usesNativeWindowCorners = DropShadow.TrySetNativeCorners(this, true);
+            }
+
+            if (!usesNativeWindowCorners)
+            {
+                DropShadow.TrySetNativeCorners(this, false);
+                if (hasRoundedCorners)
+                {
+                    int radius = LogicalPixelsToDevice(currentTheme.CornerRadius);
+                    using (var path = ThemeDrawing.CreateRoundedRectangle(
+                        new RectangleF(0, 0, Width, Height),
+                        radius))
+                    {
+                        Region = new Region(path);
+                    }
+                }
+
+                // 自定义 Region 不能与 DWM 原生投影可靠组合；直角窗口不受
+                // 此限制，继续保留经典主题原有的窗口投影。
+                DropShadow.SetShadow(this, !hasRoundedCorners);
+            }
+        }
+
+        /// <summary>返回与当前实际窗口轮廓一致的边框圆角设备像素半径。</summary>
+        private int GetWindowBorderRadius(ThemeDefinition theme)
+        {
+            int logicalRadius = usesNativeWindowCorners
+                ? NativeWindowCornerRadius
+                : theme.CornerRadius;
+            return logicalRadius > 0 ? LogicalPixelsToDevice(logicalRadius) : 0;
         }
 
         /// <summary>
@@ -839,14 +885,16 @@ namespace NoFences
         {
             UpdateRoundedRegion();
 
+            // 先同步重绘，再执行可能落盘的节流保存，避免拖动边框时新客户区
+            // 等待保存逻辑而只显示底层 Acrylic 表面。
+            Refresh();
+
             throttledResize.Run(() =>
             {
                 fenceInfo.Width = Width;
                 fenceInfo.Height = isMinified ? prevHeight : Height; // 最小化时保存展开前高度
                 Save();
             });
-
-            Refresh();
         }
 
         /// <summary>鼠标移动：触发重绘以更新悬停高亮。</summary>
@@ -1140,10 +1188,8 @@ namespace NoFences
             if (isIconManagementMode)
                 DrawIconManagementFooter(e.Graphics, theme, managementFooterHeight);
 
-            // Draw a themed outline using the same radius as the actual window region.
-            float borderRadius = theme.CornerRadius > 0
-                ? LogicalPixelsToDevice(theme.CornerRadius)
-                : 0;
+            // 边框半径必须与实际的 DWM 或 Region 窗口轮廓一致。
+            float borderRadius = GetWindowBorderRadius(theme);
             using (var borderPath = ThemeDrawing.CreateRoundedRectangle(
                 new RectangleF(
                     0.5f,
