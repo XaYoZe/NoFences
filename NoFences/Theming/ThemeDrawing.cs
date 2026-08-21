@@ -13,6 +13,9 @@ namespace NoFences.Theming
     /// </summary>
     public static class ThemeDrawing
     {
+        private const long MaximumImageFileBytes = 128L * 1024L * 1024L;
+        private const long MaximumDecodedPixels = 100L * 1000L * 1000L;
+
         public static GraphicsPath CreateRoundedRectangle(RectangleF bounds, float radius)
         {
             var path = new GraphicsPath();
@@ -78,13 +81,36 @@ namespace NoFences.Theming
 
             try
             {
+                var fileInfo = new FileInfo(path);
+                if (fileInfo.Length > MaximumImageFileBytes)
+                    return null;
                 using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (var source = Image.FromStream(stream))
+                {
+                    if ((long)source.Width * source.Height > MaximumDecodedPixels)
+                        return null;
                     return new Bitmap(source);
+                }
             }
             catch
             {
                 return null;
+            }
+        }
+
+        /// <summary>返回用于判断背景图片是否发生变化的轻量文件版本值。</summary>
+        public static long GetImageFileVersion(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return 0;
+            try
+            {
+                var info = new FileInfo(path);
+                return info.Exists ? info.LastWriteTimeUtc.Ticks ^ info.Length : 0;
+            }
+            catch
+            {
+                return 0;
             }
         }
 

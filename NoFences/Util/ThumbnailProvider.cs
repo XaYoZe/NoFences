@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -12,212 +12,327 @@ using NoFences.Win32;
 namespace NoFences.Util
 {
     /// <summary>
-    /// 图标与缩略图生成器。异步提取 Shell 高分辨率图标或生成图片缩略图，
-    /// 带尺寸缓存和并发控制。
-    /// 使用 SemaphoreSlim 限制最多 4 个并发解码任务，防止 OOM。
+    /// 异步生成图片缩略图或 Shell 图标。每个缓存项拥有自己的 Icon，窗口关闭时
+    /// 可确定性释放；后台任务通过取消令牌和 UI 同步上下文避免与绘制线程竞争。
     /// </summary>
-    public class ThumbnailProvider
+    public sealed class ThumbnailProvider : IDisposable
     {
-        /// <summary>.NET 原生支持的图片文件扩展名</summary>
+        private const long MaximumImageFileBytes = 128L * 1024L * 1024L;
+        private const long MaximumDecodedPixels = 100L * 1000L * 1000L;
+
         private static readonly string[] SupportedExtensions =
         {
-            ".bmp",
-            ".gif",
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".tiff",
-            ".tif"
+            ".bmp", ".gif", ".jpg", ".jpeg", ".png", ".tiff", ".tif"
         };
 
+        private sealed class ThumbnailState
+        {
+            public Icon Icon;
+            public int TargetSize;
+            public int LoadingSize;
+            public int FailedSize;
+        }
+
+        private readonly object syncRoot = new object();
+        private readonly SemaphoreSlim semaphore = new SemaphoreSlim(4, 4);
+        private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
+        private readonly IDictionary<string, ThumbnailState> iconCache =
+            new Dictionary<string, ThumbnailState>(StringComparer.OrdinalIgnoreCase);
+        private readonly SynchronizationContext uiContext;
         private int targetSize;
+        private bool disposed;
 
-        /// <summary>
-        /// 缩略图目标尺寸（设备像素）。
-        /// 支持运行时动态调整以匹配桌面图标大小变化。
-        /// </summary>
-        public int TargetSize
-        {
-            get => targetSize;
-            set
-            {
-                int normalizedSize = Math.Max(16, value);
-                if (targetSize == normalizedSize)
-                    return;
-
-                targetSize = normalizedSize;
-                // 保留上一档图标作为过渡；下次绘制会异步生成新尺寸
-            }
-        }
-
-        /// <summary>缩略图缓存项。</summary>
-        private class ThumbnailState
-        {
-            public Icon icon;
-            public int targetSize;
-        }
-
-        /// <summary>最多允许 4 个并发图片解码，防止 OOM</summary>
-        private readonly SemaphoreSlim semaphore = new SemaphoreSlim(4);
-        private readonly IDictionary<string, ThumbnailState> iconCache = new Dictionary<string, ThumbnailState>();
-
-        /// <summary>当异步缩略图加载完成时触发，通知 UI 刷新。</summary>
         public event EventHandler IconThumbnailLoaded;
 
         public ThumbnailProvider(int targetSize = 32)
         {
             this.targetSize = Math.Max(16, targetSize);
+            uiContext = SynchronizationContext.Current;
         }
 
-        /// <summary>判断文件是否为支持的图片格式。</summary>
+        /// <summary>缩略图目标尺寸（设备像素）。</summary>
+        public int TargetSize
+        {
+            get
+            {
+                lock (syncRoot)
+                    return targetSize;
+            }
+            set
+            {
+                lock (syncRoot)
+                    targetSize = Math.Max(16, value);
+            }
+        }
+
+        /// <summary>判断文件是否为支持直接解码的图片格式。</summary>
         public bool IsSupported(string path)
         {
-            return SupportedExtensions.Any(ext => path.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
+            return SupportedExtensions.Any(ext =>
+                path.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
         }
 
-        /// <summary>
-        /// 获取或生成指定路径的图标。
-        /// 图片文件生成高质量缩略图，其他条目异步提取目标尺寸的 Shell 图标。
-        /// </summary>
+        /// <summary>立即返回缓存或占位图标，并在需要时排队生成目标尺寸图标。</summary>
         public Icon GenerateIcon(string path)
         {
-            ThumbnailState state;
-            if (iconCache.TryGetValue(path, out state))
+            lock (syncRoot)
             {
-                if (state.targetSize != targetSize)
-                {
-                    if (IsSupported(path))
-                        SubmitGeneratorTask(path, state);
-                    else
-                        SubmitShellIconTask(path, state);
-                }
-                return state.icon;
-            }
+                if (disposed)
+                    return null;
 
-            return IsSupported(path)
-                ? SubmitGeneratorTask(path).icon
-                : SubmitShellIconTask(path).icon;
+                ThumbnailState state;
+                if (!iconCache.TryGetValue(path, out state))
+                {
+                    state = new ThumbnailState
+                    {
+                        Icon = IconUtil.GetFallbackIcon(path)
+                    };
+                    iconCache[path] = state;
+                }
+
+                int desiredSize = targetSize;
+                if (state.TargetSize != desiredSize &&
+                    state.LoadingSize != desiredSize &&
+                    state.FailedSize != desiredSize)
+                {
+                    state.LoadingSize = desiredSize;
+                    QueueGeneration(path, state, desiredSize, IsSupported(path));
+                }
+                return state.Icon;
+            }
         }
 
-        /// <summary>
-        /// 提交异步缩略图生成任务。
-        /// 先以 Shell 图标作为占位，然后在后台线程解码并缩放图片，
-        /// 完成后更新缓存并触发 IconThumbnailLoaded 事件通知 UI 刷新。
-        /// </summary>
-        private ThumbnailState SubmitGeneratorTask(string path, ThumbnailState state = null)
+        /// <summary>移除一个已不再展示的缓存项，并释放其独占图标资源。</summary>
+        public void Remove(string path)
         {
-            if (state == null)
-            {
-                state = new ThumbnailState() { icon = IconUtil.GetFallbackIcon(path) };
-                iconCache[path] = state;
-            }
-            int generationSize = targetSize;
-            state.targetSize = generationSize;
+            if (string.IsNullOrWhiteSpace(path))
+                return;
 
-            Task.Run(() =>
+            Icon icon = null;
+            lock (syncRoot)
             {
-                semaphore.Wait(); // 限制并发数
+                ThumbnailState state;
+                if (iconCache.TryGetValue(path, out state))
+                {
+                    iconCache.Remove(path);
+                    icon = state.Icon;
+                }
+            }
+            icon?.Dispose();
+        }
+
+        private void QueueGeneration(
+            string path,
+            ThumbnailState state,
+            int generationSize,
+            bool imageThumbnail)
+        {
+            CancellationToken token = cancellation.Token;
+            Task.Run(async () =>
+            {
+                Icon generated = null;
+                bool entered = false;
+                Exception failure = null;
                 try
                 {
-                    using (MemoryStream ms = new MemoryStream(File.ReadAllBytes(path)))
-                    using (var img = Image.FromStream(ms))
-                    using (var thumb = new Bitmap(generationSize, generationSize, PixelFormat.Format32bppArgb))
-                    {
-                        using (var graphics = Graphics.FromImage(thumb))
-                        {
-                            graphics.Clear(Color.Transparent);
-                            graphics.CompositingMode = CompositingMode.SourceCopy;
-                            graphics.CompositingQuality = CompositingQuality.HighQuality;
-                            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                            graphics.SmoothingMode = SmoothingMode.HighQuality;
-                            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-
-                            float scale = Math.Min(
-                                generationSize / (float)img.Width,
-                                generationSize / (float)img.Height);
-                            int width = Math.Max(1, (int)Math.Round(img.Width * scale));
-                            int height = Math.Max(1, (int)Math.Round(img.Height * scale));
-                            var destination = new Rectangle(
-                                (generationSize - width) / 2,
-                                (generationSize - height) / 2,
-                                width,
-                                height);
-                            graphics.DrawImage(img, destination, 0, 0, img.Width, img.Height, GraphicsUnit.Pixel);
-                        }
-
-                        IntPtr iconHandle = thumb.GetHicon();
-                        try
-                        {
-                            var icon = (Icon)Icon.FromHandle(iconHandle).Clone();
-                            if (state.targetSize == generationSize)
-                            {
-                                state.icon = icon;
-                                IconThumbnailLoaded?.Invoke(this, EventArgs.Empty);
-                            }
-                            else
-                            {
-                                icon.Dispose();
-                                return state.icon;
-                            }
-                            return icon;
-                        }
-                        finally
-                        {
-                            IconUtil.DestroyIcon(iconHandle);
-                        }
-                    }
+                    await semaphore.WaitAsync(token).ConfigureAwait(false);
+                    entered = true;
+                    token.ThrowIfCancellationRequested();
+                    generated = imageThumbnail
+                        ? GenerateImageThumbnail(path, generationSize)
+                        : IconUtil.GetLargeIcon(path, generationSize);
                 }
-                catch
+                catch (OperationCanceledException)
                 {
-                    return state.icon;
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
                 }
                 finally
                 {
-                    semaphore.Release();
+                    if (entered)
+                        semaphore.Release();
                 }
-            });
-            return state; // 立即返回占位图标，不阻塞调用方
+
+                PostCompletion(path, state, generationSize, generated, failure);
+            }, token);
         }
 
-        /// <summary>
-        /// 在后台按当前目标尺寸提取 Shell 高分辨率图标，
-        /// UI 线程先使用轻量级 SHGetFileInfo 图标作为占位。
-        /// </summary>
-        private ThumbnailState SubmitShellIconTask(string path, ThumbnailState state = null)
+        private static Icon GenerateImageThumbnail(string path, int generationSize)
         {
-            if (state == null)
-            {
-                state = new ThumbnailState() { icon = IconUtil.GetFallbackIcon(path) };
-                iconCache[path] = state;
-            }
-            int generationSize = targetSize;
-            state.targetSize = generationSize;
+            var fileInfo = new FileInfo(path);
+            if (fileInfo.Length > MaximumImageFileBytes)
+                throw new InvalidDataException("图片文件过大，已跳过缩略图生成。");
 
-            Task.Run(() =>
+            using (var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            using (var image = Image.FromStream(stream, false, true))
             {
-                semaphore.Wait();
+                long decodedPixels = (long)image.Width * image.Height;
+                if (decodedPixels > MaximumDecodedPixels)
+                    throw new InvalidDataException("图片像素尺寸过大，已跳过缩略图生成。");
+
+                using (var thumbnail = new Bitmap(
+                    generationSize,
+                    generationSize,
+                    PixelFormat.Format32bppArgb))
+                using (var graphics = Graphics.FromImage(thumbnail))
+                {
+                    graphics.Clear(Color.Transparent);
+                    graphics.CompositingMode = CompositingMode.SourceCopy;
+                    graphics.CompositingQuality = CompositingQuality.HighQuality;
+                    graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    graphics.SmoothingMode = SmoothingMode.HighQuality;
+                    graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+                    float scale = Math.Min(
+                        generationSize / (float)image.Width,
+                        generationSize / (float)image.Height);
+                    int width = Math.Max(1, (int)Math.Round(image.Width * scale));
+                    int height = Math.Max(1, (int)Math.Round(image.Height * scale));
+                    var destination = new Rectangle(
+                        (generationSize - width) / 2,
+                        (generationSize - height) / 2,
+                        width,
+                        height);
+                    graphics.DrawImage(
+                        image,
+                        destination,
+                        0,
+                        0,
+                        image.Width,
+                        image.Height,
+                        GraphicsUnit.Pixel);
+
+                    IntPtr iconHandle = thumbnail.GetHicon();
+                    try
+                    {
+                        return (Icon)Icon.FromHandle(iconHandle).Clone();
+                    }
+                    finally
+                    {
+                        IconUtil.DestroyIcon(iconHandle);
+                    }
+                }
+            }
+        }
+
+        private void PostCompletion(
+            string path,
+            ThumbnailState state,
+            int generationSize,
+            Icon generated,
+            Exception failure)
+        {
+            lock (syncRoot)
+            {
+                if (disposed)
+                {
+                    generated?.Dispose();
+                    return;
+                }
+            }
+
+            SendOrPostCallback completion = _ => CompleteGeneration(
+                path,
+                state,
+                generationSize,
+                generated,
+                failure);
+            if (uiContext == null)
+            {
+                completion(null);
+                return;
+            }
+
+            try
+            {
+                uiContext.Post(completion, null);
+            }
+            catch (Exception ex)
+            {
+                generated?.Dispose();
+                System.Diagnostics.Trace.WriteLine(
+                    "Unable to publish thumbnail completion: " + ex);
+            }
+        }
+
+        private void CompleteGeneration(
+            string path,
+            ThumbnailState state,
+            int generationSize,
+            Icon generated,
+            Exception failure)
+        {
+            Icon previous = null;
+            bool notify = false;
+            lock (syncRoot)
+            {
+                ThumbnailState current;
+                bool isCurrent = !disposed &&
+                                 iconCache.TryGetValue(path, out current) &&
+                                 ReferenceEquals(current, state) &&
+                                 state.LoadingSize == generationSize;
+                if (isCurrent)
+                {
+                    state.LoadingSize = 0;
+                    if (failure == null && generated != null && targetSize == generationSize)
+                    {
+                        previous = state.Icon;
+                        state.Icon = generated;
+                        state.TargetSize = generationSize;
+                        state.FailedSize = 0;
+                        generated = null;
+                        notify = true;
+                    }
+                    else if (failure != null)
+                    {
+                        state.FailedSize = generationSize;
+                    }
+                }
+            }
+
+            previous?.Dispose();
+            generated?.Dispose();
+            if (failure != null)
+                System.Diagnostics.Trace.WriteLine("Thumbnail generation failed: " + failure);
+            if (notify)
+            {
                 try
                 {
-                    var icon = IconUtil.GetLargeIcon(path, generationSize);
-                    if (state.targetSize == generationSize)
-                    {
-                        state.icon = icon;
-                        IconThumbnailLoaded?.Invoke(this, EventArgs.Empty);
-                    }
-                    return icon;
+                    IconThumbnailLoaded?.Invoke(this, EventArgs.Empty);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    return state.icon;
+                    System.Diagnostics.Trace.WriteLine(
+                        "Thumbnail completion handler failed: " + ex);
                 }
-                finally
-                {
-                    semaphore.Release();
-                }
-            });
-
-            return state;
+            }
         }
 
+        public void Dispose()
+        {
+            List<Icon> icons;
+            lock (syncRoot)
+            {
+                if (disposed)
+                    return;
+                disposed = true;
+                cancellation.Cancel();
+                icons = iconCache.Values
+                    .Select(state => state.Icon)
+                    .Where(icon => icon != null)
+                    .ToList();
+                iconCache.Clear();
+                IconThumbnailLoaded = null;
+            }
+
+            foreach (Icon icon in icons)
+                icon.Dispose();
+        }
     }
 }

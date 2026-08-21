@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -13,48 +12,30 @@ namespace NoFences.Win32
     /// </summary>
     public static class IconUtil
     {
-        /// <summary>延迟初始化的文件夹大图标缓存</summary>
-        private static Icon folderIcon;
-        private static Icon linkOverlayIcon;
-        private static readonly object iconCacheLock = new object();
-        private static readonly IDictionary<string, Icon> largeIconCache =
-            new Dictionary<string, Icon>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Lazy<Icon> FolderLargeIcon = new Lazy<Icon>(
+            () => GetStockIcon(SHSIID_FOLDER, SHGSI_LARGEICON),
+            true);
+        private static readonly Lazy<Icon> LinkOverlayIcon = new Lazy<Icon>(
+            () => GetStockIcon(SHSIID_LINK, SHGSI_LARGEICON),
+            true);
         private const float ShortcutOverlayScale = 0.8f;
 
         /// <summary>
         /// 获取系统文件夹大图标（带缓存）。
         /// 使用 null 合并运算符实现延迟初始化，只调用一次 SHGetStockIconInfo。
         /// </summary>
-        public static Icon FolderLarge => folderIcon ?? (folderIcon = GetStockIcon(SHSIID_FOLDER, SHGSI_LARGEICON));
+        public static Icon FolderLarge => FolderLargeIcon.Value;
 
         /// <summary>系统快捷方式箭头覆盖层。</summary>
-        private static Icon LinkOverlay =>
-            linkOverlayIcon ?? (linkOverlayIcon = GetStockIcon(SHSIID_LINK, SHGSI_LARGEICON));
+        private static Icon LinkOverlay => LinkOverlayIcon.Value;
 
         /// <summary>
-        /// 通过 Shell 图像工厂获取指定路径的目标尺寸图标并缓存，
+        /// 通过 Shell 图像工厂获取指定路径的目标尺寸图标，
         /// 快捷方式会重新叠加系统箭头覆盖层。
         /// </summary>
         public static Icon GetLargeIcon(string path, int targetSize)
         {
-            string cacheKey = targetSize + "|" + path;
-            lock (iconCacheLock)
-            {
-                Icon cachedIcon;
-                if (largeIconCache.TryGetValue(cacheKey, out cachedIcon))
-                    return cachedIcon;
-            }
-
-            Icon icon = GetImageFactoryIcon(path, targetSize) ?? GetFallbackIcon(path);
-            lock (iconCacheLock)
-            {
-                Icon cachedIcon;
-                if (largeIconCache.TryGetValue(cacheKey, out cachedIcon))
-                    return cachedIcon;
-
-                largeIconCache[cacheKey] = icon;
-                return icon;
-            }
+            return GetImageFactoryIcon(path, targetSize) ?? GetFallbackIcon(path);
         }
 
         /// <summary>通过 SHGetFileInfo 快速获取用于异步加载前占位的 Shell 图标。</summary>
@@ -81,15 +62,20 @@ namespace NoFences.Win32
             }
 
             if (Directory.Exists(path))
-                return FolderLarge;
+            {
+                Icon folder = FolderLarge;
+                return folder != null
+                    ? (Icon)folder.Clone()
+                    : (Icon)SystemIcons.Application.Clone();
+            }
 
             try
             {
-                return Icon.ExtractAssociatedIcon(path) ?? SystemIcons.Application;
+                return Icon.ExtractAssociatedIcon(path) ?? (Icon)SystemIcons.Application.Clone();
             }
             catch
             {
-                return SystemIcons.Application;
+                return (Icon)SystemIcons.Application.Clone();
             }
         }
 
@@ -176,7 +162,11 @@ namespace NoFences.Win32
                 return;
             }
 
-            using (var overlayBitmap = LinkOverlay.ToBitmap())
+            Icon overlay = LinkOverlay;
+            if (overlay == null)
+                return;
+
+            using (var overlayBitmap = overlay.ToBitmap())
             using (var graphics = Graphics.FromImage(bitmap))
             {
                 graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
@@ -277,7 +267,9 @@ namespace NoFences.Win32
             var info = new SHSTOCKICONINFO();
             info.cbSize = (uint)Marshal.SizeOf(info);
 
-            SHGetStockIconInfo(type, SHGSI_ICON | size, ref info);
+            int result = SHGetStockIconInfo(type, SHGSI_ICON | size, ref info);
+            if (result < 0 || info.hIcon == IntPtr.Zero)
+                return null;
 
             // 克隆一份以便安全释放原始句柄（防止资源泄漏）
             var icon = (Icon)Icon.FromHandle(info.hIcon).Clone();

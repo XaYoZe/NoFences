@@ -122,7 +122,7 @@ jobs:
       # regression check next to the Windows build. It validates the persisted
       # theme schema and, importantly, that visual style and color mode remain
       # independent dimensions without launching the desktop application.
-      - name: Validate independent theme modes
+      - name: Validate persisted schemas and theme modes
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -131,6 +131,50 @@ jobs:
 
           $assemblyPath = Join-Path $env:GITHUB_WORKSPACE "NoFences\bin\Release\NoFences.exe"
           $assembly = [System.Reflection.Assembly]::LoadFrom($assemblyPath)
+
+          $peKind = [System.Reflection.PortableExecutableKinds]::NotAPortableExecutableImage
+          $machine = [System.Reflection.ImageFileMachine]::I386
+          $assembly.ManifestModule.GetPEKind([ref]$peKind, [ref]$machine)
+          if (
+            $machine -ne [System.Reflection.ImageFileMachine]::AMD64 -or
+            ($peKind -band [System.Reflection.PortableExecutableKinds]::PE32Plus) -eq 0
+          ) {
+            throw "Release output must remain a PE32+ AMD64 executable."
+          }
+
+          # FenceInfo property names are the on-disk XML schema. New properties may
+          # be added, but these names must never be removed or renamed.
+          $fenceInfoType = $assembly.GetType("NoFences.Model.FenceInfo", $true)
+          $fenceProperties = @($fenceInfoType.GetProperties() | ForEach-Object Name)
+          $requiredFenceProperties = @(
+            "Id", "Name", "Files", "DesktopShortcuts", "PosX", "PosY",
+            "Height", "Width", "TitleHeight", "Locked", "CanMinify",
+            "PendingRemoval"
+          )
+          foreach ($propertyName in $requiredFenceProperties) {
+            if ($fenceProperties -notcontains $propertyName) {
+              throw "Persisted FenceInfo property is missing: $propertyName"
+            }
+          }
+
+          $fenceManagerType = $assembly.GetType("NoFences.Model.FenceManager", $true)
+          if ($null -eq $fenceManagerType.GetMethod("TryReleaseAllStoredDesktopShortcuts")) {
+            throw "The uninstall/recovery shortcut release API is missing."
+          }
+          if ($null -eq $fenceManagerType.GetMethod("ReconcileManagedEntryAfterShellCommand")) {
+            throw "The native Shell operation reconciliation API is missing."
+          }
+
+          foreach ($disposableTypeName in @(
+            "NoFences.Util.ThrottledExecution",
+            "NoFences.Util.ThumbnailProvider",
+            "Peter.ShellContextMenu"
+          )) {
+            $disposableType = $assembly.GetType($disposableTypeName, $true)
+            if (-not [System.IDisposable].IsAssignableFrom($disposableType)) {
+              throw "$disposableTypeName must remain deterministically disposable."
+            }
+          }
 
           $settingsType = $assembly.GetType("NoFences.Theming.ThemeSettings", $true)
           $settings = [System.Activator]::CreateInstance($settingsType)
@@ -293,6 +337,7 @@ jobs:
           SolidCompression=yes
           ArchitecturesAllowed=x64compatible
           ArchitecturesInstallIn64BitMode=x64compatible
+          MinVersion=10.0.14393
           PrivilegesRequired=lowest
           PrivilegesRequiredOverridesAllowed=dialog
           UninstallDisplayIcon={app}\NoFences.exe
@@ -336,6 +381,43 @@ jobs:
                 'NoFences requires Microsoft .NET Framework 4.8 or later.',
                 mbError,
                 MB_OK);
+          end;
+
+          function InitializeUninstall(): Boolean;
+          var
+            ResultCode: Integer;
+            Started: Boolean;
+          begin
+            Started := Exec(
+              ExpandConstant('{app}\NoFences.exe'),
+              '--restore-shortcuts --silent',
+              '',
+              SW_HIDE,
+              ewWaitUntilTerminated,
+              ResultCode);
+
+            if Started and (ResultCode = 0) then
+            begin
+              Result := True;
+              exit;
+            end;
+
+            if Started and (ResultCode = 2) then
+            begin
+              MsgBox(
+                'NoFences is still running. Exit the application and then retry uninstalling it.',
+                mbError,
+                MB_OK);
+              Result := False;
+              exit;
+            end;
+
+            Result := SuppressibleMsgBox(
+              'Some desktop shortcuts could not be restored. Continuing may leave them in the NoFences data directory.' + #13#10 + #13#10 +
+              'Do you want to continue uninstalling anyway?',
+              mbError,
+              MB_YESNO,
+              IDNO) = IDYES;
           end;
           '@ | Set-Content -LiteralPath $installerScript -Encoding utf8
 

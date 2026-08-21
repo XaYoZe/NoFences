@@ -86,13 +86,27 @@ namespace NoFences.Model
                 fenceInfo.DesktopShortcuts.Add(record);
                 if (!wasAlreadyListed)
                     fenceInfo.Files.Add(record.OriginalPath);
-                persist(fenceInfo);
+                try
+                {
+                    persist(fenceInfo);
+                }
+                catch (Exception ex)
+                {
+                    fenceInfo.DesktopShortcuts.Remove(record);
+                    if (!wasAlreadyListed)
+                        RemovePaths(fenceInfo.Files, record.OriginalPath, record.ManagedPath);
+                    error = "无法保存快捷方式接管事务：" + ex.Message;
+                    return false;
+                }
             }
             else if (!record.KeepTracked)
             {
                 error = "该快捷方式正在恢复到桌面，请稍后重试。";
                 return false;
             }
+
+            if (!ValidateRecordLocation(record, itemsDirectory, out error))
+                return false;
 
             if (EnsureManaged(fenceInfo, record, persist, out error))
                 return true;
@@ -116,6 +130,7 @@ namespace NoFences.Model
         /// </summary>
         public bool PrepareForApplicationRun(
             FenceInfo fenceInfo,
+            string itemsDirectory,
             Action<FenceInfo> persist,
             out string error)
         {
@@ -126,6 +141,29 @@ namespace NoFences.Model
             foreach (DesktopShortcutInfo record in fenceInfo.DesktopShortcuts.ToArray())
             {
                 string itemError;
+                if (!ValidateRecordLocation(record, itemsDirectory, out itemError))
+                {
+                    errors.Add(FormatError(record, itemError));
+                    continue;
+                }
+
+                if (record.State == DesktopShortcutState.Managed &&
+                    !File.Exists(record.ManagedPath))
+                {
+                    if (!ReconcileAfterShellCommand(
+                        fenceInfo,
+                        record.ManagedPath,
+                        itemsDirectory,
+                        persist,
+                        out itemError))
+                    {
+                        errors.Add(FormatError(record, itemError));
+                        continue;
+                    }
+                    if (!fenceInfo.DesktopShortcuts.Contains(record))
+                        continue;
+                }
+
                 if (!record.KeepTracked)
                 {
                     if (EnsureRestored(fenceInfo, record, persist, out itemError))
@@ -149,6 +187,7 @@ namespace NoFences.Model
         /// </summary>
         public bool TryRestoreTrackedForExit(
             FenceInfo fenceInfo,
+            string itemsDirectory,
             Action<FenceInfo> persist,
             out string error)
         {
@@ -158,6 +197,13 @@ namespace NoFences.Model
 
             foreach (DesktopShortcutInfo record in fenceInfo.DesktopShortcuts.ToArray())
             {
+                string itemError;
+                if (!ValidateRecordLocation(record, itemsDirectory, out itemError))
+                {
+                    errors.Add(FormatError(record, itemError));
+                    continue;
+                }
+
                 if (record.State == DesktopShortcutState.Restored &&
                     File.Exists(record.OriginalPath) &&
                     !File.Exists(record.ManagedPath))
@@ -167,7 +213,6 @@ namespace NoFences.Model
                     continue;
                 }
 
-                string itemError;
                 if (EnsureRestored(fenceInfo, record, persist, out itemError))
                 {
                     if (!record.KeepTracked)
@@ -190,6 +235,7 @@ namespace NoFences.Model
         public bool TryReleaseEntry(
             FenceInfo fenceInfo,
             string entryPath,
+            string itemsDirectory,
             Action<FenceInfo> persist,
             out string error)
         {
@@ -200,9 +246,21 @@ namespace NoFences.Model
                 error = "找不到该桌面快捷方式的恢复记录。";
                 return false;
             }
+            if (!ValidateRecordLocation(record, itemsDirectory, out error))
+                return false;
 
+            bool previousKeepTracked = record.KeepTracked;
             record.KeepTracked = false;
-            persist(fenceInfo);
+            try
+            {
+                persist(fenceInfo);
+            }
+            catch (Exception ex)
+            {
+                record.KeepTracked = previousKeepTracked;
+                error = "无法保存快捷方式恢复事务：" + ex.Message;
+                return false;
+            }
 
             if (!EnsureRestored(fenceInfo, record, persist, out error))
                 return false;
@@ -218,6 +276,7 @@ namespace NoFences.Model
         /// </summary>
         public bool TryReleaseAll(
             FenceInfo fenceInfo,
+            string itemsDirectory,
             Action<FenceInfo> persist,
             out string error)
         {
@@ -225,11 +284,41 @@ namespace NoFences.Model
             RemoveNullRecords(fenceInfo, persist);
             var errors = new List<string>();
 
-            foreach (DesktopShortcutInfo record in fenceInfo.DesktopShortcuts)
-                record.KeepTracked = false;
-            persist(fenceInfo);
-
+            var validRecords = new List<DesktopShortcutInfo>();
+            var changedRecords = new List<DesktopShortcutInfo>();
             foreach (DesktopShortcutInfo record in fenceInfo.DesktopShortcuts.ToArray())
+            {
+                string validationError;
+                if (!ValidateRecordLocation(record, itemsDirectory, out validationError))
+                {
+                    errors.Add(FormatError(record, validationError));
+                    continue;
+                }
+
+                validRecords.Add(record);
+                if (record.KeepTracked)
+                {
+                    record.KeepTracked = false;
+                    changedRecords.Add(record);
+                }
+            }
+            if (changedRecords.Count > 0)
+            {
+                try
+                {
+                    persist(fenceInfo);
+                }
+                catch (Exception ex)
+                {
+                    foreach (DesktopShortcutInfo record in changedRecords)
+                        record.KeepTracked = true;
+                    errors.Add("无法保存批量恢复事务：" + ex.Message);
+                    error = JoinErrors(errors);
+                    return false;
+                }
+            }
+
+            foreach (DesktopShortcutInfo record in validRecords)
             {
                 string itemError;
                 if (EnsureRestored(fenceInfo, record, persist, out itemError))
@@ -240,6 +329,112 @@ namespace NoFences.Model
 
             error = JoinErrors(errors);
             return errors.Count == 0;
+        }
+
+        /// <summary>
+        /// 原生 Shell 菜单可能直接重命名、移动或删除托管文件。菜单关闭后根据每条
+        /// 记录独占的 GUID 目录重新识别文件，并同步路径或解除已经离开的记录。
+        /// </summary>
+        public bool ReconcileAfterShellCommand(
+            FenceInfo fenceInfo,
+            string entryPath,
+            string itemsDirectory,
+            Action<FenceInfo> persist,
+            out string error)
+        {
+            EnsureCollections(fenceInfo);
+            DesktopShortcutInfo record = FindRecord(fenceInfo, entryPath);
+            if (record == null || record.State != DesktopShortcutState.Managed)
+            {
+                error = null;
+                return true;
+            }
+            if (!ValidateRecordLocation(record, itemsDirectory, out error))
+                return false;
+
+            if (File.Exists(record.ManagedPath))
+            {
+                error = null;
+                return true;
+            }
+
+            string managedDirectory = Path.GetDirectoryName(record.ManagedPath);
+            try
+            {
+                string[] remainingFiles = !string.IsNullOrWhiteSpace(managedDirectory) &&
+                                          Directory.Exists(managedDirectory)
+                    ? Directory.GetFiles(managedDirectory, "*", SearchOption.TopDirectoryOnly)
+                    : new string[0];
+
+                if (remainingFiles.Length == 0)
+                {
+                    // 文件可能已通过“剪切”回到桌面，也可能被删除或移到其他位置。
+                    // 两种情况都应遵循 Shell 原始语义并解除跟踪。
+                    RemoveTracking(fenceInfo, record, persist);
+                    error = null;
+                    return true;
+                }
+
+                if (remainingFiles.Length != 1)
+                {
+                    error = "托管目录中出现多个文件，无法确定重命名后的快捷方式。";
+                    return false;
+                }
+
+                string oldOriginalPath = record.OriginalPath;
+                string oldManagedPath = record.ManagedPath;
+                var oldFiles = new List<string>(fenceInfo.Files);
+                string newManagedPath = NormalizePath(remainingFiles[0]);
+                string originalDirectory = Path.GetDirectoryName(oldOriginalPath);
+                string newOriginalPath = Path.Combine(
+                    originalDirectory,
+                    Path.GetFileName(newManagedPath));
+
+                record.ManagedPath = newManagedPath;
+                record.OriginalPath = newOriginalPath;
+                ReplacePathsAfterShellRename(
+                    fenceInfo.Files,
+                    oldOriginalPath,
+                    oldManagedPath,
+                    newManagedPath);
+                try
+                {
+                    persist(fenceInfo);
+                }
+                catch (Exception persistError)
+                {
+                    string rollbackError = null;
+                    try
+                    {
+                        if (File.Exists(newManagedPath) && !File.Exists(oldManagedPath))
+                            File.Move(newManagedPath, oldManagedPath);
+                        if (!File.Exists(oldManagedPath) || File.Exists(newManagedPath))
+                            throw new IOException("重命名后的文件未能恢复到原托管路径。");
+                        record.ManagedPath = oldManagedPath;
+                        record.OriginalPath = oldOriginalPath;
+                        fenceInfo.Files = oldFiles;
+                    }
+                    catch (Exception ex)
+                    {
+                        rollbackError = ex.Message;
+                    }
+
+                    error = "无法保存重命名后的托管记录：" + persistError.Message;
+                    if (!string.IsNullOrWhiteSpace(rollbackError))
+                    {
+                        error += Environment.NewLine +
+                            "同时无法撤销文件重命名：" + rollbackError;
+                    }
+                    return false;
+                }
+                error = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = "无法同步原生菜单操作：" + ex.Message;
+                return false;
+            }
         }
 
         /// <summary>
@@ -297,8 +492,18 @@ namespace NoFences.Model
                 record.HasPosition = true;
             }
 
+            DesktopShortcutState previousState = record.State;
             record.State = DesktopShortcutState.MovingToStorage;
-            persist(fenceInfo);
+            try
+            {
+                persist(fenceInfo);
+            }
+            catch (Exception ex)
+            {
+                record.State = previousState;
+                error = "无法保存移入托管目录的事务：" + ex.Message;
+                return false;
+            }
 
             if (!TryTransferFile(record.OriginalPath, record.ManagedPath, out error))
                 return false;
@@ -324,7 +529,15 @@ namespace NoFences.Model
 
             record.State = DesktopShortcutState.Managed;
             ReplaceEntryPath(fenceInfo.Files, record, record.ManagedPath);
-            persist(fenceInfo);
+            try
+            {
+                persist(fenceInfo);
+            }
+            catch (Exception ex)
+            {
+                error = "快捷方式已移入托管目录，但无法保存完成状态：" + ex.Message;
+                return false;
+            }
             error = null;
             return true;
         }
@@ -375,8 +588,18 @@ namespace NoFences.Model
                 return false;
             }
 
+            DesktopShortcutState previousState = record.State;
             record.State = DesktopShortcutState.MovingToDesktop;
-            persist(fenceInfo);
+            try
+            {
+                persist(fenceInfo);
+            }
+            catch (Exception ex)
+            {
+                record.State = previousState;
+                error = "无法保存恢复到桌面的事务：" + ex.Message;
+                return false;
+            }
 
             string originalRestoreError;
             if (!TryTransferFile(
@@ -385,28 +608,46 @@ namespace NoFences.Model
                 out originalRestoreError))
             {
                 string fallbackPath;
-                string fallbackError = null;
-                if (!TryGetUserDesktopFallbackPath(
-                        record.OriginalPath,
-                        out fallbackPath) ||
-                    !TryTransferFile(
-                        record.ManagedPath,
-                        fallbackPath,
-                        out fallbackError))
+                if (!TryGetUserDesktopFallbackPath(record.OriginalPath, out fallbackPath))
                 {
                     error = originalRestoreError;
-                    if (!string.IsNullOrWhiteSpace(fallbackError))
-                    {
-                        error += Environment.NewLine +
-                            "恢复到当前用户桌面也失败：" + fallbackError;
-                    }
                     return false;
                 }
 
-                // 公共桌面可能只允许管理员写入。回退成功后把后续启动使用的
-                // 原路径更新为当前用户桌面，避免每次运行重复触发权限失败。
+                // 先持久化回退目标，再搬移文件。若进程在搬移后异常退出，下一次
+                // 启动仍能从 MovingToDesktop 状态继续完成，而不会遗失实际目标。
+                string previousOriginalPath = record.OriginalPath;
                 record.OriginalPath = fallbackPath;
-                persist(fenceInfo);
+                try
+                {
+                    persist(fenceInfo);
+                }
+                catch (Exception ex)
+                {
+                    record.OriginalPath = previousOriginalPath;
+                    error = originalRestoreError + Environment.NewLine +
+                            "无法保存当前用户桌面回退事务：" + ex.Message;
+                    return false;
+                }
+
+                string fallbackError;
+                if (!TryTransferFile(record.ManagedPath, fallbackPath, out fallbackError))
+                {
+                    record.OriginalPath = previousOriginalPath;
+                    try
+                    {
+                        persist(fenceInfo);
+                    }
+                    catch (Exception ex)
+                    {
+                        fallbackError += Environment.NewLine +
+                            "无法回滚回退目标记录：" + ex.Message;
+                    }
+
+                    error = originalRestoreError + Environment.NewLine +
+                            "恢复到当前用户桌面也失败：" + fallbackError;
+                    return false;
+                }
             }
 
             return FinalizeRestored(fenceInfo, record, persist, out error);
@@ -430,7 +671,15 @@ namespace NoFences.Model
 
             record.State = DesktopShortcutState.Restored;
             ReplaceEntryPath(fenceInfo.Files, record, record.OriginalPath);
-            persist(fenceInfo);
+            try
+            {
+                persist(fenceInfo);
+            }
+            catch (Exception ex)
+            {
+                error = "快捷方式已恢复到桌面，但无法保存完成状态：" + ex.Message;
+                return false;
+            }
 
             DesktopUtil.NotifyShellItemCreated(record.OriginalPath);
             if (record.HasPosition)
@@ -627,9 +876,25 @@ namespace NoFences.Model
             DesktopShortcutInfo record,
             Action<FenceInfo> persist)
         {
+            var previousFiles = new List<string>(fenceInfo.Files);
+            int recordIndex = fenceInfo.DesktopShortcuts.IndexOf(record);
             RemovePaths(fenceInfo.Files, record.OriginalPath, record.ManagedPath);
             fenceInfo.DesktopShortcuts.Remove(record);
-            persist(fenceInfo);
+            try
+            {
+                persist(fenceInfo);
+            }
+            catch
+            {
+                fenceInfo.Files = previousFiles;
+                if (recordIndex >= 0 && !fenceInfo.DesktopShortcuts.Contains(record))
+                {
+                    fenceInfo.DesktopShortcuts.Insert(
+                        Math.Min(recordIndex, fenceInfo.DesktopShortcuts.Count),
+                        record);
+                }
+                throw;
+            }
             TryDeleteEmptyItemDirectory(record.ManagedPath);
         }
 
@@ -651,6 +916,26 @@ namespace NoFences.Model
             }
 
             files.Insert(Math.Min(insertionIndex, files.Count), activePath);
+        }
+
+        /// <summary>把 Shell 重命名前的原路径或托管路径替换为新的托管路径。</summary>
+        private static void ReplacePathsAfterShellRename(
+            List<string> files,
+            string oldOriginalPath,
+            string oldManagedPath,
+            string newManagedPath)
+        {
+            int insertionIndex = files.Count;
+            for (int index = files.Count - 1; index >= 0; index--)
+            {
+                if (PathEquals(files[index], oldOriginalPath) ||
+                    PathEquals(files[index], oldManagedPath))
+                {
+                    insertionIndex = Math.Min(insertionIndex, index);
+                    files.RemoveAt(index);
+                }
+            }
+            files.Insert(Math.Min(insertionIndex, files.Count), newManagedPath);
         }
 
         /// <summary>删除文件列表中与任一路径匹配的所有项。</summary>
@@ -696,6 +981,59 @@ namespace NoFences.Model
                 string.IsNullOrWhiteSpace(record.ManagedPath))
             {
                 error = "恢复记录缺少必要的文件路径。";
+                return false;
+            }
+
+            error = null;
+            return true;
+        }
+
+        /// <summary>
+        /// 验证恢复记录的原路径仍位于用户/公共桌面，托管路径仍位于当前分区中
+        /// 与记录 ID 对应的专属目录，防止损坏 XML 把文件操作指向任意位置。
+        /// </summary>
+        private static bool ValidateRecordLocation(
+            DesktopShortcutInfo record,
+            string itemsDirectory,
+            out string error)
+        {
+            if (!ValidateRecord(record, out error))
+                return false;
+            if (record.Id == Guid.Empty)
+            {
+                error = "恢复记录缺少有效的唯一标识。";
+                return false;
+            }
+
+            try
+            {
+                string expectedManagedDirectory = Path.Combine(
+                    Path.GetFullPath(itemsDirectory),
+                    record.Id.ToString("N"));
+                string actualManagedDirectory = Path.GetDirectoryName(
+                    Path.GetFullPath(record.ManagedPath));
+                if (!PathEquals(actualManagedDirectory, expectedManagedDirectory))
+                {
+                    error = "托管路径已越出当前分区的专属目录，已拒绝文件操作。";
+                    return false;
+                }
+
+                string originalDirectory = Path.GetDirectoryName(
+                    Path.GetFullPath(record.OriginalPath));
+                string userDesktop = Environment.GetFolderPath(
+                    Environment.SpecialFolder.DesktopDirectory);
+                string publicDesktop = Environment.GetFolderPath(
+                    Environment.SpecialFolder.CommonDesktopDirectory);
+                if (!PathEquals(originalDirectory, userDesktop) &&
+                    !PathEquals(originalDirectory, publicDesktop))
+                {
+                    error = "原始路径已不在用户桌面或公共桌面，已拒绝文件操作。";
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                error = "恢复记录包含无效路径：" + ex.Message;
                 return false;
             }
 

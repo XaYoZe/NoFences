@@ -32,8 +32,9 @@ namespace Peter
     ///    files[0] = new FileInfo(@"c:\windows\notepad.exe");
     ///    scm.ShowContextMenu(this.Handle, files, Cursor.Position);
     /// </example>
-    public class ShellContextMenu : NativeWindow
+    public class ShellContextMenu : NativeWindow, IDisposable
     {
+        private bool disposed;
         #region Constructor
         /// <summary>Default constructor</summary>
         public ShellContextMenu()
@@ -46,7 +47,37 @@ namespace Peter
         /// <summary>Ensure all resources get released</summary>
         ~ShellContextMenu()
         {
-            ReleaseAll();
+            try
+            {
+                ReleaseAll();
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>确定性释放隐藏消息窗口以及当前 Shell COM 接口。</summary>
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            try
+            {
+                ReleaseAll();
+            }
+            finally
+            {
+                try
+                {
+                    if (Handle != IntPtr.Zero)
+                        DestroyHandle();
+                }
+                finally
+                {
+                    GC.SuppressFinalize(this);
+                }
+            }
         }
         #endregion
 
@@ -166,35 +197,58 @@ namespace Peter
         /// </summary>
         private void ReleaseAll()
         {
-            if (null != _oContextMenu)
+            if (null != _oContextMenu3)
             {
-                Marshal.ReleaseComObject(_oContextMenu);
-                _oContextMenu = null;
+                TryReleaseComObject(_oContextMenu3);
+                _oContextMenu3 = null;
             }
             if (null != _oContextMenu2)
             {
-                Marshal.ReleaseComObject(_oContextMenu2);
+                TryReleaseComObject(_oContextMenu2);
                 _oContextMenu2 = null;
             }
-            if (null != _oContextMenu3)
+            if (null != _oContextMenu)
             {
-                Marshal.ReleaseComObject(_oContextMenu3);
-                _oContextMenu3 = null;
-            }
-            if (null != _oDesktopFolder)
-            {
-                Marshal.ReleaseComObject(_oDesktopFolder);
-                _oDesktopFolder = null;
+                TryReleaseComObject(_oContextMenu);
+                _oContextMenu = null;
             }
             if (null != _oParentFolder)
             {
-                Marshal.ReleaseComObject(_oParentFolder);
+                TryReleaseComObject(_oParentFolder);
                 _oParentFolder = null;
+            }
+            if (null != _oDesktopFolder)
+            {
+                TryReleaseComObject(_oDesktopFolder);
+                _oDesktopFolder = null;
             }
             if (null != _arrPIDLs)
             {
-                FreePIDLs(_arrPIDLs);
+                try
+                {
+                    FreePIDLs(_arrPIDLs);
+                }
+                catch
+                {
+                }
                 _arrPIDLs = null;
+            }
+        }
+
+        /// <summary>释放 Shell COM 包装对象；对象已被 Explorer 断开时忽略异常。</summary>
+        private static void TryReleaseComObject(object value)
+        {
+            if (value == null || !Marshal.IsComObject(value))
+                return;
+            try
+            {
+                Marshal.ReleaseComObject(value);
+            }
+            catch (InvalidComObjectException)
+            {
+            }
+            catch (COMException)
+            {
             }
         }
         #endregion
@@ -448,6 +502,8 @@ namespace Peter
         /// <param name="pointScreen">菜单显示位置（屏幕坐标）</param>
         public void ShowContextMenu(FileInfo[] files, Point pointScreen)
         {
+            if (disposed)
+                throw new ObjectDisposedException(nameof(ShellContextMenu));
             ReleaseAll();
             _arrPIDLs = GetPIDLs(files);
             this.ShowContextMenu(pointScreen);
@@ -460,6 +516,8 @@ namespace Peter
         /// <param name="pointScreen">菜单显示位置（屏幕坐标）</param>
         public void ShowContextMenu(DirectoryInfo[] dirs, Point pointScreen)
         {
+            if (disposed)
+                throw new ObjectDisposedException(nameof(ShellContextMenu));
             ReleaseAll();
             _arrPIDLs = GetPIDLs(dirs);
             this.ShowContextMenu(pointScreen);
@@ -502,11 +560,24 @@ namespace Peter
                     CMF.NORMAL |
                     ((Control.ModifierKeys & Keys.Shift) != 0 ? CMF.EXTENDEDVERBS : 0));
 
-                Marshal.QueryInterface(iContextMenuPtr, ref IID_IContextMenu2, out iContextMenuPtr2);
-                Marshal.QueryInterface(iContextMenuPtr, ref IID_IContextMenu3, out iContextMenuPtr3);
-
-                _oContextMenu2 = (IContextMenu2)Marshal.GetTypedObjectForIUnknown(iContextMenuPtr2, typeof(IContextMenu2));
-                _oContextMenu3 = (IContextMenu3)Marshal.GetTypedObjectForIUnknown(iContextMenuPtr3, typeof(IContextMenu3));
+                if (Marshal.QueryInterface(
+                    iContextMenuPtr,
+                    ref IID_IContextMenu2,
+                    out iContextMenuPtr2) == S_OK && iContextMenuPtr2 != IntPtr.Zero)
+                {
+                    _oContextMenu2 = (IContextMenu2)Marshal.GetTypedObjectForIUnknown(
+                        iContextMenuPtr2,
+                        typeof(IContextMenu2));
+                }
+                if (Marshal.QueryInterface(
+                    iContextMenuPtr,
+                    ref IID_IContextMenu3,
+                    out iContextMenuPtr3) == S_OK && iContextMenuPtr3 != IntPtr.Zero)
+                {
+                    _oContextMenu3 = (IContextMenu3)Marshal.GetTypedObjectForIUnknown(
+                        iContextMenuPtr3,
+                        typeof(IContextMenu3));
+                }
 
                 uint nSelected = TrackPopupMenuEx(
                     pMenu,

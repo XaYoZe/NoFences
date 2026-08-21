@@ -1,50 +1,82 @@
-﻿using System;
-using System.Threading.Tasks;
+using System;
+using System.Diagnostics;
+using System.Windows.Forms;
 
 namespace NoFences.Util
 {
     /// <summary>
-    /// 节流执行工具。用于移动/调整大小等高频事件中延迟保存操作，
-    /// 避免每次 WM_MOVE/WM_SIZE 都写磁盘造成性能问题。
-    /// 
-    /// 工作方式：如果距离上次执行超过 delay 间隔则立即执行；
-    /// 否则等待剩余时间后执行一次（使用 volatile 标志保证线程安全）。
+    /// 基于 UI 消息循环的可取消防抖执行器。高频事件只保留最后一个操作，
+    /// 避免 async void 在窗口关闭后继续访问控件或把异常抛回 UI 线程。
     /// </summary>
-    public class ThrottledExecution
+    public sealed class ThrottledExecution : IDisposable
     {
-        private TimeSpan delay;
-
-        private DateTime lastExecution = DateTime.Now;
-
-        private TimeSpan TimeSinceLastExecution => DateTime.Now - lastExecution;
-
-        /// <summary>volatile 标志，防止重复排队等待任务</summary>
-        private volatile bool isAwaiting;
+        private readonly Timer timer;
+        private Action pendingAction;
+        private bool disposed;
 
         public ThrottledExecution(TimeSpan delay)
         {
-            this.delay = delay;
+            int interval = (int)Math.Max(1, Math.Min(int.MaxValue, delay.TotalMilliseconds));
+            timer = new Timer { Interval = interval };
+            timer.Tick += Timer_Tick;
         }
 
-        /// <summary>
-        /// 节流执行指定操作。高频调用时只会在满足间隔后执行最后一次。
-        /// </summary>
-        public async void Run(Action action)
+        /// <summary>替换当前待执行操作，并从本次调用重新开始计算延迟。</summary>
+        public void Run(Action action)
         {
-            if (TimeSinceLastExecution > delay)
-                action.Invoke();   // 距上次执行已超过间隔，立即执行
-            else if (!isAwaiting)  // 未在等待中，排队一次延迟执行
-            {
-                isAwaiting = true;
-                while (TimeSinceLastExecution < delay)
-                {
-                    await Task.Delay((int)(delay.TotalMilliseconds - TimeSinceLastExecution.TotalMilliseconds));
-                    action.Invoke();
-                }
-                isAwaiting = false;
-            }
-            lastExecution = DateTime.Now;
+            if (disposed)
+                return;
+            pendingAction = action ?? throw new ArgumentNullException(nameof(action));
+            timer.Stop();
+            timer.Start();
         }
 
+        /// <summary>立即执行最后一个待处理操作。</summary>
+        public void Flush()
+        {
+            if (disposed)
+                return;
+            timer.Stop();
+            ExecutePending();
+        }
+
+        /// <summary>丢弃尚未执行的操作。</summary>
+        public void Cancel()
+        {
+            timer.Stop();
+            pendingAction = null;
+        }
+
+        private void Timer_Tick(object sender, EventArgs e)
+        {
+            timer.Stop();
+            ExecutePending();
+        }
+
+        private void ExecutePending()
+        {
+            Action action = pendingAction;
+            pendingAction = null;
+            if (action == null)
+                return;
+
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine("Deferred fence persistence failed: " + ex);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+            Cancel();
+            disposed = true;
+            timer.Dispose();
+        }
     }
 }

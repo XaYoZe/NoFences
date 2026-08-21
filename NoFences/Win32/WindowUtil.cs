@@ -137,8 +137,19 @@ namespace NoFences.Win32
             GWL_EXSTYLE = (-20), // 扩展窗口样式
         }
 
-        [DllImport("user32.dll")]
-        public static extern IntPtr GetWindowLong(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)]
+        private static extern int IntGetWindowLong(IntPtr hWnd, int nIndex);
+
+        /// <summary>读取窗口样式等 32 位 LONG 值并以 IntPtr 返回供统一位运算。</summary>
+        public static IntPtr GetWindowLong(IntPtr hWnd, int nIndex)
+        {
+            SetLastError(0);
+            int result = IntGetWindowLong(hWnd, nIndex);
+            int error = Marshal.GetLastWin32Error();
+            if (result == 0 && error != 0)
+                throw new System.ComponentModel.Win32Exception(error);
+            return new IntPtr(result);
+        }
 
         /// <summary>
         /// 设置窗口属性。自动根据进程位数（32/64）选择 SetWindowLong 或 SetWindowLongPtr。

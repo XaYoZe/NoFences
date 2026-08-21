@@ -32,6 +32,15 @@ namespace NoFences
 
         private Font titleFont;
         private Font iconFont;
+        private readonly StringFormat standardIconTextFormat = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
+        private readonly StringFormat expandedIconTextFormat = new StringFormat
+        {
+            Alignment = StringAlignment.Center
+        };
 
         private string selectedItem;
         private string hoveringItem;
@@ -50,6 +59,7 @@ namespace NoFences
             new Dictionary<string, Rectangle>(StringComparer.OrdinalIgnoreCase);
         private Rectangle iconManagementConfirmBounds;
         private Rectangle iconManagementCancelBounds;
+        private int iconManagementHoverTarget;
 
         private int scrollHeight;
         private int scrollOffset;
@@ -65,15 +75,20 @@ namespace NoFences
         private readonly ShellContextMenu shellContextMenu = new ShellContextMenu();
 
         private readonly ThumbnailProvider thumbnailProvider;
+        private FileSystemWatcher managedItemsWatcher;
 
         // 主题对象始终保存为独立快照，确保一次绘制使用一致的颜色和尺寸。
         private ThemeDefinition currentTheme;
         private Image backgroundImage;
+        private string backgroundImagePath;
+        private long backgroundImageVersion;
         private readonly List<Image> themedMenuImages = new List<Image>();
         // Windows 11 顶层窗口的系统圆角为 8 个逻辑像素；由 DWM 同时裁剪
         // Acrylic 合成表面和窗口内容，避免 Form.Region 之外残留矩形模糊层。
         private const int NativeWindowCornerRadius = 8;
         private bool usesNativeWindowCorners;
+        private bool fenceRemoved;
+        private bool persistenceWarningShown;
 
         /// <summary>
         /// 将设备像素（物理像素）转换为逻辑像素（96 DPI 坐标）。
@@ -355,20 +370,19 @@ namespace NoFences
 
             // 标题栏高度：逻辑像素，有效范围 16~100
             logicalTitleHeight = (fenceInfo.TitleHeight < 16 || fenceInfo.TitleHeight > 100) ? 35 : fenceInfo.TitleHeight;
+            fenceInfo.TitleHeight = logicalTitleHeight;
             titleHeight = LogicalToDeviceUnits(logicalTitleHeight);
             
             this.MouseWheel += FenceWindow_MouseWheel;
             thumbnailProvider.IconThumbnailLoaded += ThumbnailProvider_IconThumbnailLoaded;
+            InitializeManagedItemsWatcher();
 
             ReloadFonts();
 
             AllowDrop = true; // 允许拖放文件到栅栏
 
             Text = fenceInfo.Name;
-            Location = new Point(fenceInfo.PosX, fenceInfo.PosY);
-
-            Width = fenceInfo.Width;
-            Height = fenceInfo.Height;
+            ApplyPersistedBounds();
 
             prevHeight = Height;
             lockedToolStripMenuItem.Checked = fenceInfo.Locked;
@@ -377,6 +391,143 @@ namespace NoFences
             ThemeManager.Instance.ThemeChanged += ThemeManager_ThemeChanged;
             ApplyTheme(currentTheme);
             Minify(); // 初始应用最小化状态
+        }
+
+        /// <summary>
+        /// 监控分区托管目录。原生菜单的剪切操作可能在菜单关闭后才真正搬走文件，
+        /// 因此需要通过文件系统事件补充同步，而不能只依赖菜单返回时的即时检查。
+        /// </summary>
+        private void InitializeManagedItemsWatcher()
+        {
+            try
+            {
+                string dataDirectory = Path.Combine(
+                    FenceManager.Instance.GetFenceDataDirectory(fenceInfo),
+                    "items");
+                Directory.CreateDirectory(dataDirectory);
+                managedItemsWatcher = new FileSystemWatcher(dataDirectory)
+                {
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.FileName |
+                                   NotifyFilters.LastWrite |
+                                   NotifyFilters.Size
+                };
+                managedItemsWatcher.Deleted += ManagedItemsWatcher_Deleted;
+                managedItemsWatcher.Renamed += ManagedItemsWatcher_Renamed;
+                managedItemsWatcher.Changed += ManagedItemsWatcher_Changed;
+                managedItemsWatcher.Error += (sender, args) =>
+                    System.Diagnostics.Trace.WriteLine(
+                        "Managed shortcut watcher failed: " + args.GetException());
+                managedItemsWatcher.EnableRaisingEvents = true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    "Unable to watch managed shortcut directory: " + ex);
+            }
+        }
+
+        private void ManagedItemsWatcher_Deleted(object sender, FileSystemEventArgs e)
+        {
+            QueueManagedEntryReconciliation(e.FullPath);
+        }
+
+        private void ManagedItemsWatcher_Renamed(object sender, RenamedEventArgs e)
+        {
+            QueueManagedEntryReconciliation(e.OldFullPath);
+        }
+
+        private void ManagedItemsWatcher_Changed(object sender, FileSystemEventArgs e)
+        {
+            QueueManagedEntryThumbnailRefresh(e.FullPath);
+        }
+
+        /// <summary>托管快捷方式属性发生变化后丢弃旧图标，使下一次绘制重新提取。</summary>
+        private void QueueManagedEntryThumbnailRefresh(string path)
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated)
+                return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed || Disposing ||
+                        !FenceManager.Instance.IsManagedDesktopEntry(fenceInfo, path))
+                    {
+                        return;
+                    }
+
+                    thumbnailProvider.Remove(path);
+                    Invalidate();
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        private void QueueManagedEntryReconciliation(string oldPath)
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated)
+                return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed || Disposing ||
+                        !FenceManager.Instance.IsManagedDesktopEntry(fenceInfo, oldPath))
+                    {
+                        return;
+                    }
+
+                    string error;
+                    if (!FenceManager.Instance.ReconcileManagedEntryAfterShellCommand(
+                        fenceInfo,
+                        oldPath,
+                        out error))
+                    {
+                        System.Diagnostics.Trace.WriteLine(
+                            "Managed shortcut reconciliation failed: " + error);
+                    }
+                    else
+                    {
+                        thumbnailProvider.Remove(oldPath);
+                    }
+                    selectedItem = null;
+                    hoveringItem = null;
+                    Invalidate();
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        /// <summary>校正损坏尺寸和已断开显示器留下的屏幕外坐标。</summary>
+        private void ApplyPersistedBounds()
+        {
+            int minimumWidth = Math.Max(itemWidth + itemPadding * 2, LogicalPixelsToDevice(120));
+            int minimumHeight = Math.Max(
+                titleHeight + itemHeight + itemPadding * 2,
+                LogicalPixelsToDevice(100));
+            int requestedWidth = Math.Max(minimumWidth, fenceInfo.Width);
+            int requestedHeight = Math.Max(minimumHeight, fenceInfo.Height);
+            Rectangle workingArea = Screen.FromPoint(
+                new Point(fenceInfo.PosX, fenceInfo.PosY)).WorkingArea;
+            int width = Math.Max(1, Math.Min(requestedWidth, workingArea.Width));
+            int height = Math.Max(1, Math.Min(requestedHeight, workingArea.Height));
+            int x = Math.Max(
+                workingArea.Left,
+                Math.Min(fenceInfo.PosX, workingArea.Right - width));
+            int y = Math.Max(
+                workingArea.Top,
+                Math.Min(fenceInfo.PosY, workingArea.Bottom - height));
+
+            Bounds = new Rectangle(x, y, width, height);
+            fenceInfo.PosX = x;
+            fenceInfo.PosY = y;
+            fenceInfo.Width = width;
+            fenceInfo.Height = height;
         }
 
         /// <summary>
@@ -469,8 +620,18 @@ namespace NoFences
         /// </summary>
         private void ReloadBackgroundImage()
         {
+            string path = currentTheme.BackgroundImagePath;
+            long version = ThemeDrawing.GetImageFileVersion(path);
+            if (string.Equals(path, backgroundImagePath, StringComparison.OrdinalIgnoreCase) &&
+                version == backgroundImageVersion)
+            {
+                return;
+            }
+
             backgroundImage?.Dispose();
-            backgroundImage = ThemeDrawing.LoadImageWithoutLock(currentTheme.BackgroundImagePath);
+            backgroundImage = ThemeDrawing.LoadImageWithoutLock(path);
+            backgroundImagePath = path;
+            backgroundImageVersion = version;
         }
 
         /// <summary>
@@ -658,19 +819,25 @@ namespace NoFences
         /// <summary>移除当前栅栏（删除分区及其保存的数据）。</summary>
         private void exitToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            if (MessageBox.Show(this, "Really remove this fence?", "Remove", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            if (MessageBox.Show(
+                this,
+                ThemeText.RemoveFenceQuestion,
+                ThemeText.RemoveFenceTitle,
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) == DialogResult.Yes)
             {
                 string error;
                 if (FenceManager.Instance.TryRemoveFence(fenceInfo, out error))
                 {
+                    fenceRemoved = true;
                     Close();
                 }
                 else
                 {
                     MessageBox.Show(
                         this,
-                        "Unable to restore all desktop shortcuts. The fence was kept to protect its files.\n\n" + error,
-                        "Remove fence",
+                        ThemeText.RemoveFenceFailed + Environment.NewLine + Environment.NewLine + error,
+                        ThemeText.RemoveFenceTitle,
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error);
                     Refresh();
@@ -690,8 +857,8 @@ namespace NoFences
             {
                 MessageBox.Show(
                     this,
-                    "Some desktop shortcuts could not be restored. No files were overwritten and the application will remain open.\n\n" + error,
-                    "Exit NoFences",
+                    ThemeText.ExitFailed + Environment.NewLine + Environment.NewLine + error,
+                    ThemeText.ExitTitle,
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 Refresh();
@@ -708,6 +875,7 @@ namespace NoFences
             string error;
             if (FenceManager.Instance.TryRemoveEntry(fenceInfo, item, out error))
             {
+                thumbnailProvider.Remove(item);
                 hoveringItem = null;
                 if (selectedItem == item)
                     selectedItem = null;
@@ -717,8 +885,8 @@ namespace NoFences
             {
                 MessageBox.Show(
                     this,
-                    "Unable to restore the desktop shortcut. The item remains in the fence.\n\n" + error,
-                    "Remove item",
+                    ThemeText.RemoveItemFailed + Environment.NewLine + Environment.NewLine + error,
+                    ThemeText.RemoveItemTitle,
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -747,6 +915,7 @@ namespace NoFences
             iconManagementSelection.Clear();
             iconManagementConfirmBounds = Rectangle.Empty;
             iconManagementCancelBounds = Rectangle.Empty;
+            iconManagementHoverTarget = 0;
             hoveringItem = null;
             Refresh();
         }
@@ -767,6 +936,7 @@ namespace NoFences
                 string error;
                 if (FenceManager.Instance.TryRemoveEntry(fenceInfo, path, out error))
                 {
+                    thumbnailProvider.Remove(path);
                     iconManagementSelection.Remove(path);
                     if (selectedItem == path)
                         selectedItem = null;
@@ -873,8 +1043,9 @@ namespace NoFences
             {
                 MessageBox.Show(
                     this,
-                    "Some items could not be added:\n\n" + string.Join(Environment.NewLine, errors),
-                    "Add items",
+                    ThemeText.AddItemsFailed + Environment.NewLine + Environment.NewLine +
+                    string.Join(Environment.NewLine, errors),
+                    ThemeText.AddItemsTitle,
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -900,7 +1071,33 @@ namespace NoFences
         /// <summary>鼠标移动：触发重绘以更新悬停高亮。</summary>
         private void FenceWindow_MouseMove(object sender, MouseEventArgs e)
         {
-            Refresh();
+            string hitPath = null;
+            foreach (KeyValuePair<string, Rectangle> item in entryHitBounds)
+            {
+                if (item.Value.Contains(e.Location))
+                {
+                    hitPath = item.Key;
+                    break;
+                }
+            }
+
+            int footerTarget = 0;
+            if (isIconManagementMode)
+            {
+                if (iconManagementConfirmBounds.Contains(e.Location))
+                    footerTarget = 1;
+                else if (iconManagementCancelBounds.Contains(e.Location))
+                    footerTarget = 2;
+            }
+
+            if (string.Equals(hitPath, hoveringItem, StringComparison.OrdinalIgnoreCase) &&
+                footerTarget == iconManagementHoverTarget)
+            {
+                return;
+            }
+
+            iconManagementHoverTarget = footerTarget;
+            Invalidate();
         }
 
         /// <summary>鼠标进入：如果允许最小化且当前是最小化状态，则展开窗口。</summary>
@@ -916,6 +1113,7 @@ namespace NoFences
         /// <summary>鼠标离开：尝试最小化窗口。选中状态不取消，由用户点击其他条目或空白区域来改变。</summary>
         private void FenceWindow_MouseLeave(object sender, EventArgs e)
         {
+            iconManagementHoverTarget = 0;
             Minify();
             Refresh();
         }
@@ -1061,8 +1259,11 @@ namespace NoFences
                 {
                     // 用不限高度测量文字真实高度，超过标准 2 行高度才需展开
                     var testMaxSize = new SizeF(itemWidth - 12, 9999);
-                    var testFormat = new StringFormat { Alignment = StringAlignment.Center };
-                    var testSize = e.Graphics.MeasureString(entry.Name, iconFont, testMaxSize, testFormat);
+                    var testSize = e.Graphics.MeasureString(
+                        entry.Name,
+                        iconFont,
+                        testMaxSize,
+                        expandedIconTextFormat);
                     needsExpand = testSize.Height > textHeight;
                 }
 
@@ -1106,12 +1307,11 @@ namespace NoFences
                 var expandTextPadding = itemPadding / 3;
                 var expandTextPos = new PointF(expandEntryX + 6, expandEntryY + iconSize + expandTextPadding);
                 var expandMaxSize = new SizeF(itemWidth - 12, 9999); // 不限制行数
-                var expandFormat = new StringFormat
-                {
-                    Alignment = StringAlignment.Center
-                    // 不设置 Trimming，显示全部文字
-                };
-                var expandTextSize = e.Graphics.MeasureString(expandEntryName, iconFont, expandMaxSize, expandFormat);
+                var expandTextSize = e.Graphics.MeasureString(
+                    expandEntryName,
+                    iconFont,
+                    expandMaxSize,
+                    expandedIconTextFormat);
                 float drawHeight = expandTextSize.Height;
                 var drawSize = new SizeF(expandTextSize.Width, drawHeight);
 
@@ -1121,6 +1321,12 @@ namespace NoFences
                     itemWidth + 2, iconSize + (int)drawHeight + gap + 2);
                 var expandMousePos = PointToClient(MousePosition);
                 bool expandMouseOver = expandOutlineRect.Contains(expandMousePos);
+                entryHitBounds[expandEntry.Path] = expandOutlineRect;
+                if (expandMouseOver)
+                {
+                    hoveringItem = expandEntry.Path;
+                    hasHoverUpdated = true;
+                }
                 if (theme.MenuStyle != ThemeMenuStyle.WindowsXp)
                 {
                     DrawModernDesktopItemState(
@@ -1148,7 +1354,7 @@ namespace NoFences
                     e.Graphics,
                     expandEntryName,
                     new RectangleF(expandTextPos, drawSize),
-                    expandFormat,
+                    expandedIconTextFormat,
                     theme,
                     true,
                     expandMouseOver);
@@ -1231,13 +1437,11 @@ namespace NoFences
             var textMaxSize = new SizeF(itemWidth - 12, textHeight);
 
             // 按 Windows 桌面规则始终允许自动换行，居中、末尾省略号截断
-            var stringFormat = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                Trimming = StringTrimming.EllipsisCharacter
-            };
-
-            var textSize = g.MeasureString(name, iconFont, textMaxSize, stringFormat);
+            var textSize = g.MeasureString(
+                name,
+                iconFont,
+                textMaxSize,
+                standardIconTextFormat);
             var gap = textPadding;
             var outlineRect = new Rectangle(x - 2, y - 2, itemWidth + 2, iconSize + (int)textSize.Height + gap + 2);
 
@@ -1294,7 +1498,7 @@ namespace NoFences
                 g,
                 name,
                 new RectangleF(textPosition, textMaxSize),
-                stringFormat,
+                standardIconTextFormat,
                 theme,
                 selected,
                 mouseOver);
@@ -1868,11 +2072,7 @@ namespace NoFences
         {
             if (icon == null)
                 return;
-
-            using (var bitmap = icon.ToBitmap())
-            {
-                graphics.DrawImage(bitmap, targetRectangle);
-            }
+            graphics.DrawIcon(icon, targetRectangle);
         }
 
         /// <summary>按当前桌面风格绘制原色图标或 XP 经典选中染色图标。</summary>
@@ -1952,7 +2152,7 @@ namespace NoFences
         /// <summary>创建新栅栏。</summary>
         private void newFenceToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            FenceManager.Instance.CreateFence("New fence");
+            FenceManager.Instance.CreateFence(ThemeText.NewFenceName);
         }
 
         /// <summary>打开全局主题配置面板。</summary>
@@ -1976,18 +2176,43 @@ namespace NoFences
         /// <summary>窗口关闭：如果最后一个栅栏关闭则退出应用。</summary>
         private void FenceWindow_FormClosed(object sender, FormClosedEventArgs e)
         {
+            if (fenceRemoved)
+            {
+                throttledMove.Cancel();
+                throttledResize.Cancel();
+            }
+            else
+            {
+                throttledMove.Flush();
+                throttledResize.Flush();
+            }
+            throttledMove.Dispose();
+            throttledResize.Dispose();
+
             ThemeManager.Instance.ThemeChanged -= ThemeManager_ThemeChanged;
             thumbnailProvider.IconThumbnailLoaded -= ThumbnailProvider_IconThumbnailLoaded;
+            thumbnailProvider.Dispose();
             iconMetricsPollTimer.Stop();
             iconMetricsPollTimer.Dispose();
+            shellContextMenu.Dispose();
+            if (managedItemsWatcher != null)
+            {
+                managedItemsWatcher.EnableRaisingEvents = false;
+                managedItemsWatcher.Dispose();
+                managedItemsWatcher = null;
+            }
 
             backgroundImage?.Dispose();
             backgroundImage = null;
+            backgroundImagePath = null;
+            backgroundImageVersion = 0;
             ClearContextMenuIcons();
             titleFont?.Dispose();
             titleFont = null;
             iconFont?.Dispose();
             iconFont = null;
+            standardIconTextFormat.Dispose();
+            expandedIconTextFormat.Dispose();
 
             if (Application.OpenForms.Count == 0)
                 Application.Exit();
@@ -1997,9 +2222,26 @@ namespace NoFences
         /// <summary>保存栅栏数据到磁盘（线程安全）。</summary>
         private void Save()
         {
-            lock (saveLock)
+            try
             {
-                FenceManager.Instance.UpdateFence(fenceInfo);
+                lock (saveLock)
+                {
+                    FenceManager.Instance.UpdateFence(fenceInfo);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine("Fence persistence failed: " + ex);
+                if (!persistenceWarningShown && !IsDisposed && !Disposing)
+                {
+                    persistenceWarningShown = true;
+                    MessageBox.Show(
+                        this,
+                        ThemeText.PersistenceFailed + Environment.NewLine + Environment.NewLine + ex.Message,
+                        ThemeText.PersistenceTitle,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
             }
         }
 
@@ -2067,7 +2309,52 @@ namespace NoFences
             if (hoveringItem != null && !ModifierKeys.HasFlag(Keys.Shift))
             {
                 // 右键条目 → Windows Shell 右键菜单
-                shellContextMenu.ShowContextMenu(new[] { new FileInfo(hoveringItem) }, MousePosition);
+                string shellItem = hoveringItem;
+                bool wasManaged = FenceManager.Instance.IsManagedDesktopEntry(
+                    fenceInfo,
+                    shellItem);
+                try
+                {
+                    shellContextMenu.ShowContextMenu(
+                        new[] { new FileInfo(shellItem) },
+                        MousePosition);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        this,
+                        ThemeText.NativeMenuFailed + Environment.NewLine + Environment.NewLine + ex.Message,
+                        ThemeText.NativeMenuTitle,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    return;
+                }
+
+                if (wasManaged)
+                {
+                    string reconcileError;
+                    bool reconciled = FenceManager.Instance.ReconcileManagedEntryAfterShellCommand(
+                        fenceInfo,
+                        shellItem,
+                        out reconcileError);
+                    if (!reconciled)
+                    {
+                        MessageBox.Show(
+                            this,
+                            ThemeText.NativeMenuSyncFailed + Environment.NewLine + Environment.NewLine +
+                            reconcileError,
+                            ThemeText.NativeMenuTitle,
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
+                    else if (!File.Exists(shellItem))
+                    {
+                        thumbnailProvider.Remove(shellItem);
+                    }
+                    selectedItem = null;
+                    hoveringItem = null;
+                    Refresh();
+                }
             }
             else
             {

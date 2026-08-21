@@ -117,15 +117,6 @@ namespace NoFences.Win32
             }
         }
 
-        [DllImport("User32.dll", EntryPoint = "GetWindowLong")]
-        private extern static Int32 GetWindowLongPtr(IntPtr hWnd, Int32 nIndex);
-
-        [DllImport("User32.dll", EntryPoint = "SetWindowLong")]
-        private extern static Int32 SetWindowLongPtr(IntPtr hWnd, Int32 nIndex, Int32 dwNewLong);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        static extern int SetWindowLong(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-
         [DllImport("user32.dll", SetLastError = true)]
         static extern IntPtr FindWindow(string lpWindowClass, string lpWindowName);
 
@@ -613,8 +604,11 @@ namespace NoFences.Win32
         /// </summary>
         public static void PreventMinimize(IntPtr handle)
         {
-            Int32 windowStyle = GetWindowLongPtr(handle, GWL_STYLE);
-            SetWindowLongPtr(handle, GWL_STYLE, windowStyle & ~WS_MAXIMIZEBOX & ~WS_MINIMIZEBOX);
+            long windowStyle = WindowUtil.GetWindowLong(handle, GWL_STYLE).ToInt64();
+            WindowUtil.SetWindowLong(
+                handle,
+                GWL_STYLE,
+                new IntPtr(windowStyle & ~WS_MAXIMIZEBOX & ~WS_MINIMIZEBOX));
         }
 
         /// <summary>
@@ -624,7 +618,9 @@ namespace NoFences.Win32
         public static void GlueToDesktop(IntPtr handle)
         {
             IntPtr nWinHandle = FindWindowEx(IntPtr.Zero, IntPtr.Zero, "Progman", null);
-            SetWindowLongPtr(handle, GWL_HWNDPARENT, nWinHandle.ToInt32());
+            if (nWinHandle == IntPtr.Zero)
+                throw new InvalidOperationException("找不到桌面 Progman 窗口。");
+            WindowUtil.SetWindowLong(handle, GWL_HWNDPARENT, nWinHandle);
            
         }
     }

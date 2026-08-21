@@ -778,6 +778,8 @@ namespace NoFences.Theming
     {
         private ThemeDefinition theme = ThemePresets.CreateDefault();
         private Image backgroundImage;
+        private string backgroundImagePath;
+        private long backgroundImageVersion;
 
         public ThemePreviewControl()
         {
@@ -794,8 +796,16 @@ namespace NoFences.Theming
             set
             {
                 theme = value != null ? value.Clone() : ThemePresets.CreateDefault();
-                backgroundImage?.Dispose();
-                backgroundImage = ThemeDrawing.LoadImageWithoutLock(theme.BackgroundImagePath);
+                string path = theme.BackgroundImagePath;
+                long version = ThemeDrawing.GetImageFileVersion(path);
+                if (!string.Equals(path, backgroundImagePath, StringComparison.OrdinalIgnoreCase) ||
+                    version != backgroundImageVersion)
+                {
+                    backgroundImage?.Dispose();
+                    backgroundImage = ThemeDrawing.LoadImageWithoutLock(path);
+                    backgroundImagePath = path;
+                    backgroundImageVersion = version;
+                }
                 BackColor = theme.DialogBackgroundColor;
                 Invalidate();
             }
@@ -817,7 +827,10 @@ namespace NoFences.Theming
         protected override void Dispose(bool disposing)
         {
             if (disposing)
+            {
                 backgroundImage?.Dispose();
+                backgroundImage = null;
+            }
             base.Dispose(disposing);
         }
 

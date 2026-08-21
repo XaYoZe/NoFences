@@ -16,7 +16,9 @@ namespace NoFences
         public HeightDialog(int val)
         {
             InitializeComponent();
-            trackBarTitleHeight.Value = val;
+            trackBarTitleHeight.Value = Math.Max(
+                trackBarTitleHeight.Minimum,
+                Math.Min(trackBarTitleHeight.Maximum, val));
             UpdateText();
         }
 
